@@ -214,8 +214,6 @@ def parse_single_uri(uri):
 def parse_vless(uri):
     """解析 vless:// URI"""
     try:
-        log(f"解析 vless URI: {uri[:60]}...")
-        # vless://uuid@server:port?params#name
         rest = uri[8:]  # 去掉 vless://
         if '#' in rest:
             rest, name = rest.rsplit('#', 1)
@@ -489,29 +487,50 @@ def parse_subscription(url):
     nodes = []
     try:
         log(f"下载订阅: {url[:50]}...")
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/plain, */*"
+        })
         r.raise_for_status()
         content = r.text.strip()
 
         log(f"订阅内容长度: {len(content)}, 前100字符: {content[:100]}")
 
         lines = content.splitlines()
-        log(f"总行数: {len(lines)}")
+
+        # 检查是否包含 URI 节点，没有则尝试 base64 解码
+        has_uri = False
+        for l in lines:
+            for prefix in ["vless://", "vmess://", "ss://", "trojan://"]:
+                if l.startswith(prefix):
+                    has_uri = True
+                    break
+            if has_uri:
+                break
+
+        if not has_uri and len(lines) <= 5:
+            try:
+                import base64
+                raw = content.replace('\n', '').replace('\r', '').strip()
+                padding = 4 - len(raw) % 4
+                if padding != 4:
+                    raw += '=' * padding
+                decoded = base64.b64decode(raw).decode('utf-8', errors='replace')
+                lines = decoded.splitlines()
+                log(f"base64 解码后 {len(lines)} 行: {decoded[:100]}...")
+            except Exception as e:
+                log(f"base64 解码失败: {e}", "WARN")
 
         for i, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
-            log(f"行{i}: {line[:60]}...")
 
             if line.startswith("vless://") or line.startswith("vmess://") or \
                line.startswith("ss://") or line.startswith("trojan://"):
                 outbound = parse_single_uri(line)
                 if outbound:
                     nodes.append(outbound)
-                    log(f"  -> 解析成功: {outbound.get('tag', 'unknown')}")
-                else:
-                    log(f"  -> 解析失败", "WARN")
 
         log(f"订阅解析完成，共 {len(nodes)} 个节点")
     except Exception as e:

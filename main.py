@@ -780,6 +780,8 @@ class SingBoxManager:
             "outbounds": [outbound]
         }
 
+        log(f"sing-box 配置: server={outbound.get('server','?')}:{outbound.get('server_port','?')}  type={outbound.get('type','?')}")
+
         with open(CONFIG_PATH, 'w') as f:
             json.dump(config, f, indent=2)
 
@@ -790,7 +792,7 @@ class SingBoxManager:
                 stderr=subprocess.PIPE,
                 preexec_fn=os.setsid
             )
-            time.sleep(2)
+            time.sleep(3)
 
             if self.process.poll() is not None:
                 stderr = self.process.stderr.read().decode()
@@ -809,27 +811,67 @@ class SingBoxManager:
             try:
                 os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
             except Exception:
-                pass
+                try:
+                    self.process.terminate()
+                except Exception:
+                    pass
             try:
                 self.process.wait(timeout=5)
             except Exception:
                 try:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
                 except Exception:
-                    pass
+                    try:
+                        self.process.kill()
+                    except Exception:
+                        pass
             self.process = None
             log("sing-box 已停止")
 
     def check(self):
         """检查 sing-box 代理是否可用"""
+        if self.process and self.process.poll() is not None:
+            stderr = self.process.stderr.read().decode()
+            log(f"sing-box 进程已退出: {stderr[:200]}", "WARN")
+            return False
+
+        proxy = f"socks5://127.0.0.1:{SING_BOX_PORT}"
+
+        # 方式1: requests + PySocks
         try:
-            proxy = f"socks5://127.0.0.1:{SING_BOX_PORT}"
             ip = get_current_ip(proxy=proxy)
             if ip and ip != "未知":
                 log(f"代理检测通过，出口 IP: {ip}")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"requests 代理检测异常: {e}", "WARN")
+
+        # 方式2: curl 兜底
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "10",
+                 "--socks5-hostname", f"127.0.0.1:{SING_BOX_PORT}",
+                 "https://api.ipify.org"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                ip = result.stdout.strip()
+                log(f"curl 代理检测通过，出口 IP: {ip}")
+                return True
+            log(f"curl 代理检测失败: {result.stderr[:100]}", "WARN")
+        except Exception as e:
+            log(f"curl 代理检测异常: {e}", "WARN")
+
+        # 方式3: 直接检查进程是否存活
+        if self.process:
+            try:
+                self.process.wait(timeout=0.1)
+                stderr = self.process.stderr.read().decode()
+                log(f"sing-box 已退出: {stderr[:200]}", "ERROR")
+                return False
+            except subprocess.TimeoutExpired:
+                pass
+
         log("代理检测失败", "WARN")
         return False
 

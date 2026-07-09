@@ -1349,7 +1349,7 @@ def renew_single_url(url, sing_box, node_pool, use_proxy=True):
                     except Exception:
                         pass
                     page = None
-if attempt < MAX_RENEW_RETRIES_PER_URL:
+                    if attempt < MAX_RENEW_RETRIES_PER_URL:
                         if use_proxy and sing_box:
                             force_backup = (attempt > 3)
                             restart_proxy(sing_box, node_pool, force_backup=force_backup, target_url=url)

@@ -31,7 +31,7 @@ MAX_CAPTCHA = 3
 MAX_RENEW_RETRIES_PER_URL = 10
 SING_BOX_PORT = 1080
 CONFIG_PATH = "/tmp/sing-box-config.json"
-SING_BOX_BIN = "/usr/local/bin/sing-box"
+SING_BOX_BIN = None  # 运行时自动检测
 
 # ==============================================================================
 # 自定义异常
@@ -1200,10 +1200,30 @@ def renew_single_url(url, sing_box, node_pool):
 # 主入口
 # ==============================================================================
 def main():
+    global SING_BOX_BIN
+
     tg_token = os.getenv("TG_BOT_TOKEN")
     tg_chat_id = os.getenv("TG_CHAT_ID")
     primary_uri = os.getenv("host2")
     sub_url = os.getenv("SUB_URL")
+
+    # 自动检测 sing-box 路径
+    for path in ["/usr/bin/sing-box", "/usr/local/bin/sing-box", "/opt/sing-box/sing-box"]:
+        if os.path.isfile(path):
+            SING_BOX_BIN = path
+            break
+    if not SING_BOX_BIN:
+        try:
+            result = subprocess.run(["which", "sing-box"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                SING_BOX_BIN = result.stdout.strip()
+        except Exception:
+            pass
+    if SING_BOX_BIN:
+        log(f"sing-box 路径: {SING_BOX_BIN}")
+    else:
+        log("未找到 sing-box 二进制", "ERROR")
+        sys.exit(1)
 
     if not RENEW_URLS:
         log("请在 RENEW_URLS 列表中添加续期链接", "ERROR")

@@ -1433,8 +1433,7 @@ def main():
         sys.exit(1)
 
     if not primary_uri and not sub_url:
-        log("未配置 host2 或 SUB_URL 节点，无法启动", "ERROR")
-        sys.exit(1)
+        log("未配置 host2 或 SUB_URL 节点，将使用 WARP 直连模式", "WARN")
 
     # 尝试检测 sing-box（没有则跳过代理模式）
     for path in ["/usr/bin/sing-box", "/usr/local/bin/sing-box", "/opt/sing-box/sing-box"]:

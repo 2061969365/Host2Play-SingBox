@@ -883,25 +883,209 @@ class SingBoxManager:
 # ==============================================================================
 # WARP 重连 → 改为 sing-box 重连
 # ==============================================================================
-def restart_proxy(sing_box, node_pool, force_backup=False, target_url=None):
+def restart_proxy(proxy_mgr, node_pool, force_backup=False, target_url=None):
     """停止当前节点，切换到下一个"""
-    sing_box.stop()
+    proxy_mgr.stop()
 
     outbound = node_pool.get_next_node(force_backup=force_backup)
     if not outbound:
         log("无可用节点，无法重启", "ERROR")
         return False
 
-    if not sing_box.start(outbound):
+    if not proxy_mgr.start(outbound):
         return False
 
-    if sing_box.check(target_url=target_url):
+    if proxy_mgr.check(target_url=target_url):
         return True
 
     log("新节点不可用，尝试下一个", "WARN")
-    return restart_proxy(sing_box, node_pool, force_backup=True, target_url=target_url)
+    return restart_proxy(proxy_mgr, node_pool, force_backup=True, target_url=target_url)
 
 # ==============================================================================
+# vless → xray JSON 配置转换
+# ==============================================================================
+XRAY_BIN = None
+XRAY_CONFIG_PATH = "/tmp/xray-config.json"
+
+def vless_to_xray_config(outbound):
+    """把 sing-box 格式的 vless outbound 转成 xray 配置"""
+    server = outbound.get("server", "")
+    port = outbound.get("server_port", 443)
+    uuid = outbound.get("uuid", "")
+    tls = outbound.get("tls", {})
+    transport = outbound.get("transport", {})
+    flow = outbound.get("flow", "")
+
+    xray_outbound = {
+        "protocol": "vless",
+        "settings": {
+            "vnext": [{
+                "address": server,
+                "port": port,
+                "users": [{
+                    "id": uuid,
+                    "encryption": "none",
+                    "flow": flow if flow in ("xtls-rprx-vision", "xtls-rprx-vision-udp443") else ""
+                }]
+            }]
+        },
+        "streamSettings": {
+            "network": transport.get("type", "tcp"),
+            "security": "tls"
+        }
+    }
+
+    # TLS / Reality 配置
+    if tls.get("reality", {}).get("enabled"):
+        xray_outbound["streamSettings"]["security"] = "reality"
+        xray_outbound["streamSettings"]["realitySettings"] = {
+            "serverName": tls.get("server_name", server),
+            "fingerprint": tls.get("utls", {}).get("fingerprint", "chrome"),
+            "publicKey": tls.get("reality", {}).get("public_key", ""),
+            "shortId": tls.get("reality", {}).get("short_id", ""),
+            "show": False
+        }
+    elif tls.get("enabled"):
+        xray_outbound["streamSettings"]["security"] = "tls"
+        tls_settings = {
+            "serverName": tls.get("server_name", server),
+            "allowInsecure": tls.get("insecure", False),
+        }
+        fp = tls.get("utls", {}).get("fingerprint", "")
+        if fp:
+            tls_settings["fingerprint"] = fp
+        alpn = tls.get("alpn", [])
+        if alpn:
+            tls_settings["alpn"] = alpn
+        xray_outbound["streamSettings"]["tlsSettings"] = tls_settings
+
+    # WS 传输
+    if transport.get("type") == "ws":
+        ws_settings = {
+            "path": transport.get("path", "/"),
+            "headers": transport.get("headers", {})
+        }
+        xray_outbound["streamSettings"]["wsSettings"] = ws_settings
+
+    # gRPC 传输
+    elif transport.get("type") == "grpc":
+        grpc_settings = {
+            "serviceName": transport.get("service_name", ""),
+            "multiMode": False
+        }
+        xray_outbound["streamSettings"]["grpcSettings"] = grpc_settings
+
+    return xray_outbound
+
+
+def build_xray_config(outbound_dict):
+    """生成完整的 xray 配置 JSON"""
+    xray_out = vless_to_xray_config(outbound_dict)
+    return {
+        "log": {"loglevel": "warning"},
+        "inbounds": [{
+            "listen": "127.0.0.1",
+            "port": 1080,
+            "protocol": "socks",
+            "settings": {"udp": True}
+        }],
+        "outbounds": [xray_out]
+    }
+
+
+# ==============================================================================
+# Xray 管理
+# ==============================================================================
+class XrayManager:
+    def __init__(self):
+        self.process = None
+
+    def start(self, outbound):
+        self.stop()
+
+        config = build_xray_config(outbound)
+        log(f"xray 配置: server={outbound.get('server','?')}:{outbound.get('server_port','?')}  type=vless({outbound.get('tls',{}).get('reality',{}).get('enabled') and 'reality' or 'tls'})")
+
+        with open(XRAY_CONFIG_PATH, 'w') as f:
+            json.dump(config, f, indent=2)
+
+        try:
+            self.process = subprocess.Popen(
+                [XRAY_BIN, "run", "-c", XRAY_CONFIG_PATH],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            time.sleep(3)
+
+            if self.process.poll() is not None:
+                stderr = self.process.stderr.read().decode()
+                log(f"xray 启动失败: {stderr[:200]}", "ERROR")
+                return False
+
+            log(f"xray 启动成功 (PID: {self.process.pid})")
+            return True
+        except Exception as e:
+            log(f"xray 启动异常: {e}", "ERROR")
+            return False
+
+    def stop(self):
+        if self.process:
+            try:
+                self.process.terminate()
+            except Exception:
+                pass
+            try:
+                self.process.wait(timeout=5)
+            except Exception:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+            self.process = None
+            log("xray 已停止")
+
+    def check(self, target_url=None):
+        if self.process and self.process.poll() is not None:
+            stderr = self.process.stderr.read().decode()
+            log(f"xray 进程已退出: {stderr[:200]}", "WARN")
+            return False
+
+        check_url = target_url or "https://host2play.gratis"
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "15",
+                 "--socks5-hostname", f"127.0.0.1:1080",
+                 check_url],
+                capture_output=True, text=True, timeout=20
+            )
+            http_code = result.stdout.strip()
+            if http_code and http_code not in ("000", ""):
+                log(f"xray 代理检测通过，目标响应: HTTP {http_code}")
+                return True
+        except Exception as e:
+            log(f"xray curl 检测异常: {e}", "WARN")
+
+        if self.process:
+            try:
+                self.process.wait(timeout=0.1)
+                stderr = self.process.stderr.read().decode()
+                log(f"xray 已退出: {stderr[:200]}", "ERROR")
+                return False
+            except subprocess.TimeoutExpired:
+                pass
+
+        log("xray 代理检测失败", "WARN")
+        return False
+
+
+def select_proxy_manager(outbound, sing_box, xray_mgr):
+    """根据节点协议选择合适的内核"""
+    if outbound.get("type") == "vless":
+        tls = outbound.get("tls", {})
+        if tls.get("reality", {}).get("enabled") and XRAY_BIN:
+            return xray_mgr, "xray"
+    return sing_box, "sing-box"
 # reCAPTCHA 辅助函数
 # ==============================================================================
 def find_recaptcha_frame(page, kind):
@@ -1219,7 +1403,7 @@ def solve_recaptcha(page):
 # ==============================================================================
 # 单个 URL 续期流程
 # ==============================================================================
-def renew_single_url(url, sing_box, node_pool, use_proxy=True):
+def renew_single_url(url, proxy_mgr, node_pool, use_proxy=True):
     success = False
     server_name = "未知"
     old_expire = "未知"
@@ -1350,9 +1534,9 @@ def renew_single_url(url, sing_box, node_pool, use_proxy=True):
                         pass
                     page = None
                     if attempt < MAX_RENEW_RETRIES_PER_URL:
-                        if use_proxy and sing_box:
+                        if use_proxy and proxy_mgr:
                             force_backup = (attempt > 3)
-                            restart_proxy(sing_box, node_pool, force_backup=force_backup, target_url=url)
+                            restart_proxy(proxy_mgr, node_pool, force_backup=force_backup, target_url=url)
                         continue
                     break
 
@@ -1392,9 +1576,9 @@ def renew_single_url(url, sing_box, node_pool, use_proxy=True):
                         except Exception:
                             pass
                         page = None
-                    if use_proxy and sing_box:
+                    if use_proxy and proxy_mgr:
                         force_backup = (attempt > 3)
-                        restart_proxy(sing_box, node_pool, force_backup=force_backup, target_url=url)
+                        restart_proxy(proxy_mgr, node_pool, force_backup=force_backup, target_url=url)
                     continue
                 break
             finally:
@@ -1421,7 +1605,7 @@ def renew_single_url(url, sing_box, node_pool, use_proxy=True):
 # 主入口
 # ==============================================================================
 def main():
-    global SING_BOX_BIN
+    global SING_BOX_BIN, XRAY_BIN
 
     tg_token = os.getenv("TG_BOT_TOKEN")
     tg_chat_id = os.getenv("TG_CHAT_ID")
@@ -1435,7 +1619,7 @@ def main():
     if not primary_uri and not sub_url:
         log("未配置 host2 或 SUB_URL 节点，将使用 WARP 直连模式", "WARN")
 
-    # 尝试检测 sing-box（没有则跳过代理模式）
+    # 检测 sing-box
     for path in ["/usr/bin/sing-box", "/usr/local/bin/sing-box", "/opt/sing-box/sing-box"]:
         if os.path.isfile(path):
             SING_BOX_BIN = path
@@ -1447,28 +1631,53 @@ def main():
                 SING_BOX_BIN = result.stdout.strip()
         except Exception:
             pass
-
-    proxy_available = False
-    sing_box = SingBoxManager()
-    node_pool = None
-
     if SING_BOX_BIN:
         log(f"sing-box 路径: {SING_BOX_BIN}")
+
+    # 检测 xray
+    for path in ["/usr/local/bin/xray", "/usr/local/lib/xray/xray", "/usr/bin/xray"]:
+        if os.path.isfile(path):
+            XRAY_BIN = path
+            break
+    if not XRAY_BIN:
+        try:
+            result = subprocess.run(["which", "xray"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                XRAY_BIN = result.stdout.strip()
+        except Exception:
+            pass
+    if XRAY_BIN:
+        log(f"xray 路径: {XRAY_BIN}")
+
+    node_pool = None
+    proxy_mgr = None
+    proxy_available = False
+
+    if SING_BOX_BIN or XRAY_BIN:
+        sing_box = SingBoxManager()
+        xray_mgr = XrayManager() if XRAY_BIN else None
         node_pool = NodePool(primary_uri=primary_uri, sub_url=sub_url)
 
         outbound = node_pool.get_next_node()
-        if outbound and sing_box.start(outbound) and sing_box.check(target_url=RENEW_URLS[0]):
-            proxy_available = True
-            log("代理模式就绪")
-        else:
-            log("代理模式不可用，尝试备用节点...", "WARN")
-            if outbound and restart_proxy(sing_box, node_pool, force_backup=True, target_url=RENEW_URLS[0]):
+        if outbound:
+            proxy_mgr, kernel = select_proxy_manager(outbound, sing_box, xray_mgr)
+            log(f"使用内核: {kernel}")
+            if proxy_mgr.start(outbound) and proxy_mgr.check(target_url=RENEW_URLS[0]):
                 proxy_available = True
-                log("代理模式就绪（备用节点）")
+                log("代理模式就绪")
             else:
-                log("所有代理节点不可用，后续将使用 WARP 直连", "WARN")
-    else:
-        log("未找到 sing-box，将使用 WARP 直连模式", "WARN")
+                log(f"{kernel} 不可用，尝试切换内核...", "WARN")
+                proxy_mgr.stop()
+                alt_mgr, _ = select_proxy_manager(outbound, sing_box, xray_mgr)
+                if alt_mgr and alt_mgr != proxy_mgr and alt_mgr.start(outbound) and alt_mgr.check(target_url=RENEW_URLS[0]):
+                    proxy_mgr = alt_mgr
+                    proxy_available = True
+                    log("代理模式就绪（备用内核）")
+                else:
+                    log("所有内核不可用，尝试备用节点...", "WARN")
+
+    if not proxy_available and node_pool:
+        log("所有节点不可用，后续将使用 WARP 直连", "WARN")
 
     total_success = 0
     for idx, url in enumerate(RENEW_URLS, 1):
@@ -1476,19 +1685,18 @@ def main():
         log(f"处理第 {idx} 个链接: {url}")
         log(f"{'#'*60}")
 
-        if proxy_available:
+        if proxy_available and proxy_mgr:
             success, server_name, old_expire, new_expire, screenshot, failure_reason, node_info = renew_single_url(
-                url, sing_box, node_pool, use_proxy=True
+                url, proxy_mgr, node_pool, use_proxy=True
             )
         else:
             success = False
             failure_reason = "代理不可用"
 
-        # 代理模式失败，切 WARP 直连兜底
         if not success:
             log("切换到 WARP 直连模式", "WARN")
-            if sing_box:
-                sing_box.stop()
+            if proxy_mgr:
+                proxy_mgr.stop()
             success, server_name, old_expire, new_expire, screenshot, failure_reason, node_info = renew_single_url(
                 url, None, None, use_proxy=False
             )
@@ -1501,8 +1709,8 @@ def main():
 
         send_tg_photo(tg_token, tg_chat_id, screenshot, caption, parse_mode='HTML')
 
-    if sing_box:
-        sing_box.stop()
+    if proxy_mgr:
+        proxy_mgr.stop()
     log(f"全部完成，成功 {total_success}/{len(RENEW_URLS)} 个链接")
     if total_success < len(RENEW_URLS):
         sys.exit(1)

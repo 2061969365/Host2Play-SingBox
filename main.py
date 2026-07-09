@@ -1272,7 +1272,7 @@ def renew_single_url(url, sing_box, node_pool):
 
                 server_name = get_server_name(page)
                 old_expire = get_expire_time(page)
-                node_info = sing_box.current_outbound.get('tag', '未知') if sing_box.current_outbound else '未知'
+                node_info = node_pool.current_outbound.get('tag', '未知') if node_pool.current_outbound else '未知'
                 log(f"服务器: {server_name}, 到期时间: {old_expire}, 节点: {node_info}")
 
                 # 清理遮挡广告

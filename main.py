@@ -841,41 +841,33 @@ class SingBoxManager:
             self.process = None
             log("sing-box 已停止")
 
-    def check(self):
-        """检查 sing-box 代理是否可用"""
+    def check(self, target_url=None):
+        """检查 sing-box 代理是否可用（检测目标网站而非 api.ipify.org）"""
         if self.process and self.process.poll() is not None:
             stderr = self.process.stderr.read().decode()
             log(f"sing-box 进程已退出: {stderr[:200]}", "WARN")
             return False
 
         proxy = f"socks5://127.0.0.1:{SING_BOX_PORT}"
+        check_url = target_url or "https://host2play.gratis"
 
-        # 方式1: requests + PySocks
-        try:
-            ip = get_current_ip(proxy=proxy)
-            if ip and ip != "未知":
-                log(f"代理检测通过，出口 IP: {ip}")
-                return True
-        except Exception as e:
-            log(f"requests 代理检测异常: {e}", "WARN")
-
-        # 方式2: curl 兜底
+        # 方式1: curl 通过代理访问目标网站（主要检测方式）
         try:
             result = subprocess.run(
-                ["curl", "-s", "--max-time", "10",
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "15",
                  "--socks5-hostname", f"127.0.0.1:{SING_BOX_PORT}",
-                 "https://api.ipify.org"],
-                capture_output=True, text=True, timeout=15
+                 check_url],
+                capture_output=True, text=True, timeout=20
             )
-            if result.returncode == 0 and result.stdout.strip():
-                ip = result.stdout.strip()
-                log(f"curl 代理检测通过，出口 IP: {ip}")
+            http_code = result.stdout.strip()
+            if http_code and http_code not in ("000", ""):
+                log(f"代理检测通过，目标响应: HTTP {http_code}")
                 return True
-            log(f"curl 代理检测失败: {result.stderr[:100]}", "WARN")
         except Exception as e:
             log(f"curl 代理检测异常: {e}", "WARN")
 
-        # 方式3: 直接检查进程是否存活
+        # 方式2: 直接检查进程是否存活
         if self.process:
             try:
                 self.process.wait(timeout=0.1)
@@ -891,7 +883,7 @@ class SingBoxManager:
 # ==============================================================================
 # WARP 重连 → 改为 sing-box 重连
 # ==============================================================================
-def restart_proxy(sing_box, node_pool, force_backup=False):
+def restart_proxy(sing_box, node_pool, force_backup=False, target_url=None):
     """停止当前节点，切换到下一个"""
     sing_box.stop()
 
@@ -903,11 +895,11 @@ def restart_proxy(sing_box, node_pool, force_backup=False):
     if not sing_box.start(outbound):
         return False
 
-    if sing_box.check():
+    if sing_box.check(target_url=target_url):
         return True
 
     log("新节点不可用，尝试下一个", "WARN")
-    return restart_proxy(sing_box, node_pool, force_backup=True)
+    return restart_proxy(sing_box, node_pool, force_backup=True, target_url=target_url)
 
 # ==============================================================================
 # reCAPTCHA 辅助函数
@@ -1357,15 +1349,11 @@ def renew_single_url(url, sing_box, node_pool, use_proxy=True):
                     except Exception:
                         pass
                     page = None
-                    if attempt < MAX_RENEW_RETRIES_PER_URL:
+if attempt < MAX_RENEW_RETRIES_PER_URL:
                         if use_proxy and sing_box:
                             force_backup = (attempt > 3)
-                            restart_proxy(sing_box, node_pool, force_backup=force_backup)
+                            restart_proxy(sing_box, node_pool, force_backup=force_backup, target_url=url)
                         continue
-                    break
-                except Exception as e:
-                    log(f"reCAPTCHA 异常: {e}", "ERROR")
-                    failure_reason = f"reCAPTCHA 异常: {e}"
                     break
 
                 if not solved:
@@ -1406,7 +1394,7 @@ def renew_single_url(url, sing_box, node_pool, use_proxy=True):
                         page = None
                     if use_proxy and sing_box:
                         force_backup = (attempt > 3)
-                        restart_proxy(sing_box, node_pool, force_backup=force_backup)
+                        restart_proxy(sing_box, node_pool, force_backup=force_backup, target_url=url)
                     continue
                 break
             finally:
@@ -1470,12 +1458,12 @@ def main():
         node_pool = NodePool(primary_uri=primary_uri, sub_url=sub_url)
 
         outbound = node_pool.get_next_node()
-        if outbound and sing_box.start(outbound) and sing_box.check():
+        if outbound and sing_box.start(outbound) and sing_box.check(target_url=RENEW_URLS[0]):
             proxy_available = True
             log("代理模式就绪")
         else:
             log("代理模式不可用，尝试备用节点...", "WARN")
-            if outbound and restart_proxy(sing_box, node_pool, force_backup=True):
+            if outbound and restart_proxy(sing_box, node_pool, force_backup=True, target_url=RENEW_URLS[0]):
                 proxy_available = True
                 log("代理模式就绪（备用节点）")
             else:

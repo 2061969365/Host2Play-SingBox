@@ -214,6 +214,7 @@ def parse_single_uri(uri):
 def parse_vless(uri):
     """解析 vless:// URI"""
     try:
+        log(f"解析 vless URI: {uri[:60]}...")
         # vless://uuid@server:port?params#name
         rest = uri[8:]  # 去掉 vless://
         if '#' in rest:
@@ -492,15 +493,25 @@ def parse_subscription(url):
         r.raise_for_status()
         content = r.text.strip()
 
-        for line in content.splitlines():
+        log(f"订阅内容长度: {len(content)}, 前100字符: {content[:100]}")
+
+        lines = content.splitlines()
+        log(f"总行数: {len(lines)}")
+
+        for i, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
+            log(f"行{i}: {line[:60]}...")
+
             if line.startswith("vless://") or line.startswith("vmess://") or \
                line.startswith("ss://") or line.startswith("trojan://"):
                 outbound = parse_single_uri(line)
                 if outbound:
                     nodes.append(outbound)
+                    log(f"  -> 解析成功: {outbound.get('tag', 'unknown')}")
+                else:
+                    log(f"  -> 解析失败", "WARN")
 
         log(f"订阅解析完成，共 {len(nodes)} 个节点")
     except Exception as e:

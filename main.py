@@ -244,7 +244,6 @@ def parse_vless(uri):
             "server": server,
             "server_port": port,
             "uuid": uuid,
-            "flow": "xtls-rprx-vision"
         }
 
         tls_enabled = params.get('security', [''])[0] in ('tls', '')

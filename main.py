@@ -212,9 +212,9 @@ def parse_single_uri(uri):
         return None
 
 def parse_vless(uri):
-    """解析 vless:// URI"""
+    """解析 vless:// URI（完整参数支持）"""
     try:
-        rest = uri[8:]  # 去掉 vless://
+        rest = uri[8:]
         if '#' in rest:
             rest, name = rest.rsplit('#', 1)
             name = unquote(name)
@@ -238,6 +238,10 @@ def parse_vless(uri):
 
         params = parse_qs(params_str)
 
+        def p(key, default=None):
+            vals = params.get(key)
+            return vals[0] if vals else default
+
         outbound = {
             "type": "vless",
             "tag": name,
@@ -246,30 +250,107 @@ def parse_vless(uri):
             "uuid": uuid,
         }
 
-        tls_enabled = params.get('security', [''])[0] in ('tls', '')
-        if tls_enabled:
-            sni = params.get('sni', [server])[0]
-            fingerprint = params.get('fp', ['chrome'])[0]
-            outbound["tls"] = {
+        # flow (xtls-rprx-vision / xtls-rprx-vision-udp443)
+        flow = p("flow", "").lower()
+        if flow in ("xtls-rprx-vision", "xtls-rprx-vision-udp443"):
+            outbound["flow"] = flow
+
+        # packet encoding
+        pe = p("packetEncoding", "")
+        if pe:
+            outbound["packet_encoding"] = pe
+
+        # TLS
+        security = p("security", "")
+        tls_enabled = security in ("tls", "reality", "")
+
+        if security == "reality":
+            reality_pbk = p("pbk", "")
+            reality_sid = p("sid", "")
+            reality_spx = p("spx", "")
+            sni = p("sni", server)
+            fingerprint = p("fp", "chrome")
+
+            tls_config = {
                 "enabled": True,
                 "server_name": sni,
-                "utls": {
+                "utls": {"enabled": True, "fingerprint": fingerprint},
+                "reality": {
+                    "enabled": True,
+                    "public_key": reality_pbk,
+                }
+            }
+            if reality_sid:
+                tls_config["reality"]["short_id"] = reality_sid
+            if reality_spx:
+                tls_config["reality"]["server_spider_x"] = reality_spx
+
+            outbound["tls"] = tls_config
+
+        elif tls_enabled:
+            sni = p("sni", server)
+            fingerprint = p("fp", "chrome")
+            insecure = p("insecure", "0") in ("1", "true", "yes")
+            allow_insecure = p("allowInsecure", "0") in ("1", "true", "yes")
+            alpn_raw = p("alpn", "")
+
+            tls_config = {
+                "enabled": True,
+                "server_name": sni,
+            }
+
+            if insecure or allow_insecure:
+                tls_config["insecure"] = True
+
+            if alpn_raw:
+                tls_config["alpn"] = [a.strip() for a in alpn_raw.split(",")]
+
+            if fingerprint != "none":
+                tls_config["utls"] = {
                     "enabled": True,
                     "fingerprint": fingerprint
                 }
-            }
 
-        transport_type = params.get('type', ['ws'])[0]
-        if transport_type == 'ws':
-            ws_path = params.get('path', ['/'])[0]
-            ws_host = params.get('host', [server])[0]
-            outbound["transport"] = {
+            outbound["tls"] = tls_config
+
+        # transport
+        transport_type = p("type", "tcp")
+
+        if transport_type == "ws":
+            ws_path = p("path", "/")
+            ws_host = p("host", server)
+            transport = {
                 "type": "ws",
                 "path": ws_path,
-                "headers": {
-                    "Host": ws_host
-                }
+                "headers": {"Host": ws_host}
             }
+            ed = p("ed", "")
+            if ed:
+                try:
+                    transport["max_early_data"] = int(ed)
+                except ValueError:
+                    pass
+            outbound["transport"] = transport
+
+        elif transport_type == "grpc":
+            grpc_service = p("serviceName", "")
+            transport = {"type": "grpc"}
+            if grpc_service:
+                transport["service_name"] = grpc_service
+            outbound["transport"] = transport
+
+        elif transport_type == "tcp":
+            header_type = p("headerType", "none")
+            if header_type == "http":
+                transport = {
+                    "type": "tcp",
+                    "header": {
+                        "type": "http",
+                        "request": {},
+                        "response": {}
+                    }
+                }
+                outbound["transport"] = transport
 
         return outbound
     except Exception as e:
@@ -277,10 +358,9 @@ def parse_vless(uri):
         return None
 
 def parse_vmess(uri):
-    """解析 vmess:// URI (base64)"""
+    """解析 vmess:// URI（完整参数支持）"""
     try:
         encoded = uri[8:]
-        # 添加 base64 padding
         padding = 4 - len(encoded) % 4
         if padding != 4:
             encoded += '=' * padding
@@ -295,6 +375,14 @@ def parse_vmess(uri):
         alter_id = data.get("aid", 0)
         net = data.get("net", "ws")
         tls = data.get("tls", "")
+        scy = data.get("scy", "auto")
+        sni = data.get("sni", server)
+        host = data.get("host", server)
+        path = data.get("path", "/")
+        alpn_raw = data.get("alpn", "")
+        fp = data.get("fp", "chrome")
+        insecure = data.get("allowInsecure", "0") in ("1", "true", "yes")
+        header_type = data.get("headerType", "none")
 
         outbound = {
             "type": "vmess",
@@ -303,25 +391,59 @@ def parse_vmess(uri):
             "server_port": port,
             "uuid": uuid,
             "alter_id": alter_id,
-            "security": "auto"
+            "security": scy if scy in ("auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero") else "auto",
         }
 
-        if tls == "tls":
-            sni = data.get("sni", server)
-            outbound["tls"] = {
+        if tls in ("tls", "1", "true"):
+            tls_config = {
                 "enabled": True,
                 "server_name": sni,
-                "utls": {"enabled": True, "fingerprint": "chrome"}
             }
 
+            if insecure:
+                tls_config["insecure"] = True
+
+            if alpn_raw:
+                tls_config["alpn"] = [a.strip() for a in alpn_raw.split(",")]
+
+            fp_lower = fp.lower()
+            if fp_lower != "none":
+                tls_config["utls"] = {"enabled": True, "fingerprint": fp_lower}
+
+            outbound["tls"] = tls_config
+
         if net == "ws":
-            path = data.get("path", "/")
-            host = data.get("host", server)
-            outbound["transport"] = {
+            transport = {
                 "type": "ws",
                 "path": path,
                 "headers": {"Host": host}
             }
+            ed = data.get("maxEarlyData", "")
+            if ed:
+                try:
+                    transport["max_early_data"] = int(ed)
+                except ValueError:
+                    pass
+            outbound["transport"] = transport
+
+        elif net == "grpc":
+            grpc_service = data.get("serviceName", "")
+            transport = {"type": "grpc"}
+            if grpc_service:
+                transport["service_name"] = grpc_service
+            outbound["transport"] = transport
+
+        elif net == "tcp":
+            if header_type == "http":
+                transport = {
+                    "type": "tcp",
+                    "header": {
+                        "type": "http",
+                        "request": {},
+                        "response": {}
+                    }
+                }
+                outbound["transport"] = transport
 
         return outbound
     except Exception as e:
@@ -419,6 +541,10 @@ def parse_trojan(uri):
 
         params = parse_qs(params_str)
 
+        def p(key, default=None):
+            vals = params.get(key)
+            return vals[0] if vals else default
+
         outbound = {
             "type": "trojan",
             "tag": name,
@@ -427,22 +553,72 @@ def parse_trojan(uri):
             "password": password
         }
 
-        sni = params.get('sni', [server])[0]
-        outbound["tls"] = {
+        # flow
+        flow = p("flow", "").lower()
+        if flow in ("xtls-rprx-vision", "xtls-rprx-vision-udp443"):
+            outbound["flow"] = flow
+
+        # TLS
+        sni = p("sni", server)
+        insecure = p("insecure", "0") in ("1", "true", "yes")
+        allow_insecure = p("allowInsecure", "0") in ("1", "true", "yes")
+        alpn_raw = p("alpn", "")
+        fingerprint = p("fp", "chrome")
+
+        tls_config = {
             "enabled": True,
             "server_name": sni,
-            "utls": {"enabled": True, "fingerprint": "chrome"}
         }
 
-        transport_type = params.get('type', ['ws'])[0]
-        if transport_type == 'ws':
-            ws_path = params.get('path', ['/'])[0]
-            ws_host = params.get('host', [server])[0]
-            outbound["transport"] = {
+        if insecure or allow_insecure:
+            tls_config["insecure"] = True
+
+        if alpn_raw:
+            tls_config["alpn"] = [a.strip() for a in alpn_raw.split(",")]
+
+        if fingerprint != "none":
+            tls_config["utls"] = {"enabled": True, "fingerprint": fingerprint}
+
+        outbound["tls"] = tls_config
+
+        # transport
+        transport_type = p("type", "tcp")
+
+        if transport_type == "ws":
+            ws_path = p("path", "/")
+            ws_host = p("host", server)
+            transport = {
                 "type": "ws",
                 "path": ws_path,
                 "headers": {"Host": ws_host}
             }
+            ed = p("ed", "")
+            if ed:
+                try:
+                    transport["max_early_data"] = int(ed)
+                except ValueError:
+                    pass
+            outbound["transport"] = transport
+
+        elif transport_type == "grpc":
+            grpc_service = p("serviceName", "")
+            transport = {"type": "grpc"}
+            if grpc_service:
+                transport["service_name"] = grpc_service
+            outbound["transport"] = transport
+
+        elif transport_type == "tcp":
+            header_type = p("headerType", "none")
+            if header_type == "http":
+                transport = {
+                    "type": "tcp",
+                    "header": {
+                        "type": "http",
+                        "request": {},
+                        "response": {}
+                    }
+                }
+                outbound["transport"] = transport
 
         return outbound
     except Exception as e:

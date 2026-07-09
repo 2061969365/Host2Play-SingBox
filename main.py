@@ -718,28 +718,37 @@ def parse_subscription(url):
 # ==============================================================================
 class NodePool:
     def __init__(self, primary_uri=None, sub_url=None):
-        self.primary_uri = primary_uri
-        self.primary_outbound = None
+        self.primary_nodes = []  # 改为列表，支持多节点
         self.backup_nodes = []
         self.current_outbound = None
+        self.primary_index = 0
         self.used_indices = set()
 
         if primary_uri:
-            self.primary_outbound = parse_single_uri(primary_uri)
-            if self.primary_outbound:
-                log(f"主节点解析成功: {self.primary_outbound.get('tag', 'unknown')}")
+            for line in primary_uri.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                outbound = parse_single_uri(line)
+                if outbound:
+                    self.primary_nodes.append(outbound)
+
+            if self.primary_nodes:
+                log(f"主节点解析成功，共 {len(self.primary_nodes)} 个")
             else:
-                log("主节点解析失败", "WARN")
+                log("主节点全部解析失败", "WARN")
 
         if sub_url:
             self.backup_nodes = parse_subscription(sub_url)
             log(f"备用节点池: {len(self.backup_nodes)} 个")
 
     def get_next_node(self, force_backup=False):
-        """获取下一个节点（优先主节点）"""
-        if not force_backup and self.primary_outbound:
-            self.current_outbound = self.primary_outbound
-            log(f"使用主节点: {self.current_outbound.get('tag', 'unknown')}")
+        """获取下一个节点（优先主节点池，再切备用池）"""
+        if not force_backup and self.primary_nodes:
+            node = self.primary_nodes[self.primary_index % len(self.primary_nodes)]
+            self.primary_index += 1
+            self.current_outbound = node
+            log(f"使用主节点 #{self.primary_index}/{len(self.primary_nodes)}: {node.get('tag', 'unknown')}")
             return self.current_outbound
 
         if self.backup_nodes:
@@ -759,6 +768,9 @@ class NodePool:
 
     def has_backup(self):
         return len(self.backup_nodes) > 0
+
+    def has_primary(self):
+        return len(self.primary_nodes) > 0
 
 # ==============================================================================
 # sing-box 管理

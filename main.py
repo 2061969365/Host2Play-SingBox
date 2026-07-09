@@ -1227,14 +1227,14 @@ def solve_recaptcha(page):
 # ==============================================================================
 # 单个 URL 续期流程
 # ==============================================================================
-def renew_single_url(url, sing_box, node_pool):
+def renew_single_url(url, sing_box, node_pool, use_proxy=True):
     success = False
     server_name = "未知"
     old_expire = "未知"
     new_expire = "未知"
     screenshot_path = None
     failure_reason = ""
-    node_info = ""
+    node_info = "WARP 直连" if not use_proxy else ""
     screenshot_dir = "output/screenshots"
     os.makedirs(screenshot_dir, exist_ok=True)
 
@@ -1260,7 +1260,8 @@ def renew_single_url(url, sing_box, node_pool):
                 co.set_argument('--window-size=1280,720')
                 co.set_argument('--log-level=3')
                 co.set_argument('--silent')
-                co.set_argument(f'--proxy-server=socks5://127.0.0.1:{SING_BOX_PORT}')
+                if use_proxy:
+                    co.set_argument(f'--proxy-server=socks5://127.0.0.1:{SING_BOX_PORT}')
                 user_data_dir = tempfile.mkdtemp()
                 co.set_user_data_path(user_data_dir)
                 co.auto_port()
@@ -1285,7 +1286,7 @@ def renew_single_url(url, sing_box, node_pool):
 
                 server_name = get_server_name(page)
                 old_expire = get_expire_time(page)
-                node_info = node_pool.current_outbound.get('tag', '未知') if node_pool.current_outbound else '未知'
+                node_info = node_pool.current_outbound.get('tag', '未知') if node_pool and node_pool.current_outbound else 'WARP 直连'
                 log(f"服务器: {server_name}, 到期时间: {old_expire}, 节点: {node_info}")
 
                 # 清理遮挡广告
@@ -1357,8 +1358,9 @@ def renew_single_url(url, sing_box, node_pool):
                         pass
                     page = None
                     if attempt < MAX_RENEW_RETRIES_PER_URL:
-                        force_backup = (attempt > 3)
-                        restart_proxy(sing_box, node_pool, force_backup=force_backup)
+                        if use_proxy and sing_box:
+                            force_backup = (attempt > 3)
+                            restart_proxy(sing_box, node_pool, force_backup=force_backup)
                         continue
                     break
                 except Exception as e:
@@ -1402,8 +1404,9 @@ def renew_single_url(url, sing_box, node_pool):
                         except Exception:
                             pass
                         page = None
-                    force_backup = (attempt > 3)
-                    restart_proxy(sing_box, node_pool, force_backup=force_backup)
+                    if use_proxy and sing_box:
+                        force_backup = (attempt > 3)
+                        restart_proxy(sing_box, node_pool, force_backup=force_backup)
                     continue
                 break
             finally:
@@ -1437,7 +1440,15 @@ def main():
     primary_uri = os.getenv("host2")
     sub_url = os.getenv("SUB_URL")
 
-    # 自动检测 sing-box 路径
+    if not RENEW_URLS:
+        log("请在 RENEW_URLS 列表中添加续期链接", "ERROR")
+        sys.exit(1)
+
+    if not primary_uri and not sub_url:
+        log("未配置 host2 或 SUB_URL 节点，无法启动", "ERROR")
+        sys.exit(1)
+
+    # 尝试检测 sing-box（没有则跳过代理模式）
     for path in ["/usr/bin/sing-box", "/usr/local/bin/sing-box", "/opt/sing-box/sing-box"]:
         if os.path.isfile(path):
             SING_BOX_BIN = path
@@ -1449,41 +1460,28 @@ def main():
                 SING_BOX_BIN = result.stdout.strip()
         except Exception:
             pass
+
+    proxy_available = False
+    sing_box = SingBoxManager()
+    node_pool = None
+
     if SING_BOX_BIN:
         log(f"sing-box 路径: {SING_BOX_BIN}")
+        node_pool = NodePool(primary_uri=primary_uri, sub_url=sub_url)
+
+        outbound = node_pool.get_next_node()
+        if outbound and sing_box.start(outbound) and sing_box.check():
+            proxy_available = True
+            log("代理模式就绪")
+        else:
+            log("代理模式不可用，尝试备用节点...", "WARN")
+            if outbound and restart_proxy(sing_box, node_pool, force_backup=True):
+                proxy_available = True
+                log("代理模式就绪（备用节点）")
+            else:
+                log("所有代理节点不可用，后续将使用 WARP 直连", "WARN")
     else:
-        log("未找到 sing-box 二进制", "ERROR")
-        sys.exit(1)
-
-    if not RENEW_URLS:
-        log("请在 RENEW_URLS 列表中添加续期链接", "ERROR")
-        sys.exit(1)
-
-    if not primary_uri and not sub_url:
-        log("未配置 host2 或 SUB_URL 节点，无法启动", "ERROR")
-        sys.exit(1)
-
-    # 构建节点池
-    node_pool = NodePool(primary_uri=primary_uri, sub_url=sub_url)
-
-    # 初始化 sing-box
-    sing_box = SingBoxManager()
-
-    # 启动第一个节点
-    outbound = node_pool.get_next_node()
-    if not outbound:
-        log("无法获取初始节点", "ERROR")
-        sys.exit(1)
-
-    if not sing_box.start(outbound):
-        log("sing-box 启动失败", "ERROR")
-        sys.exit(1)
-
-    if not sing_box.check():
-        log("初始节点检测失败，尝试下一个", "WARN")
-        if not restart_proxy(sing_box, node_pool, force_backup=True):
-            log("所有节点不可用", "ERROR")
-            sys.exit(1)
+        log("未找到 sing-box，将使用 WARP 直连模式", "WARN")
 
     total_success = 0
     for idx, url in enumerate(RENEW_URLS, 1):
@@ -1491,7 +1489,22 @@ def main():
         log(f"处理第 {idx} 个链接: {url}")
         log(f"{'#'*60}")
 
-        success, server_name, old_expire, new_expire, screenshot, failure_reason, node_info = renew_single_url(url, sing_box, node_pool)
+        if proxy_available:
+            success, server_name, old_expire, new_expire, screenshot, failure_reason, node_info = renew_single_url(
+                url, sing_box, node_pool, use_proxy=True
+            )
+        else:
+            success = False
+            failure_reason = "代理不可用"
+
+        # 代理模式失败，切 WARP 直连兜底
+        if not success:
+            log("切换到 WARP 直连模式", "WARN")
+            if sing_box:
+                sing_box.stop()
+            success, server_name, old_expire, new_expire, screenshot, failure_reason, node_info = renew_single_url(
+                url, None, None, use_proxy=False
+            )
 
         if success:
             caption = build_notification(True, url, server_name, old_expire, new_expire, node_info=node_info)
@@ -1501,7 +1514,8 @@ def main():
 
         send_tg_photo(tg_token, tg_chat_id, screenshot, caption, parse_mode='HTML')
 
-    sing_box.stop()
+    if sing_box:
+        sing_box.stop()
     log(f"全部完成，成功 {total_success}/{len(RENEW_URLS)} 个链接")
     if total_success < len(RENEW_URLS):
         sys.exit(1)

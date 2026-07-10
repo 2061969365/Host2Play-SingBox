@@ -29,7 +29,7 @@ RENEW_URLS = [
 ]
 
 MAX_CAPTCHA = 5
-MAX_RENEW_RETRIES_PER_URL = 10
+MAX_RENEW_RETRIES_PER_URL = 50
 SING_BOX_PORT = 1080
 CONFIG_PATH = "/tmp/sing-box-config.json"
 SING_BOX_BIN = None  # 运行时自动检测
@@ -1420,14 +1420,13 @@ def renew_single_url(url, proxy_mgr, node_pool, use_proxy=True):
                 try:
                     solved = solve_recaptcha(page)
                 except CaptchaBlocked:
-                    log("IP 被封锁，等待 30s 后换节点重试", "WARN")
+                    log("IP 被封锁，换节点重试", "WARN")
                     failure_reason = "IP 被 reCAPTCHA 封锁"
                     try:
                         page.quit()
                     except Exception:
                         pass
                     page = None
-                    time.sleep(30)
                     if attempt < MAX_RENEW_RETRIES_PER_URL:
                         if use_proxy and proxy_mgr:
                             force_backup = (attempt > 3)

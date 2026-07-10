@@ -55,10 +55,11 @@ jobs:
 
       - name: 安装 xray-core
         run: |
-          wget -q https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip -O /tmp/xray.zip
-          unzip -q /tmp/xray.zip -d /usr/local/lib/xray/
-          chmod +x /usr/local/lib/xray/xray
-          ln -sf /usr/local/lib/xray/xray /usr/local/bin/xray
+          sudo mkdir -p /usr/local/lib/xray
+          sudo wget -q https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip -O /tmp/xray.zip
+          sudo unzip -q /tmp/xray.zip -d /usr/local/lib/xray/
+          sudo chmod +x /usr/local/lib/xray/xray
+          sudo ln -sf /usr/local/lib/xray/xray /usr/local/bin/xray
           xray version
 
       - name: 执行续订

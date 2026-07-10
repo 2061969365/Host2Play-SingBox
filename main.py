@@ -66,7 +66,6 @@ def send_tg_photo(token, chat_id, photo_path, caption, parse_mode='HTML'):
 # 页面元素提取
 # ==============================================================================
 def safe_locate(frame_or_page, selector, timeout_ms=3000):
-    """安全定位元素，返回 None 如果找不到"""
     try:
         el = frame_or_page.wait_for_selector(selector, timeout=timeout_ms, state='visible')
         return el
@@ -531,7 +530,7 @@ def solve_recaptcha(page):
     raise RuntimeError("验证码达到最大尝试次数")
 
 # ==============================================================================
-# 单个 URL 续期流程
+# 单个 URL 续期流程 —— 所有重试共享一个 Camoufox 实例
 # ==============================================================================
 def renew_single_url(url):
     success = False
@@ -543,171 +542,164 @@ def renew_single_url(url):
     screenshot_dir = "output/screenshots"
     os.makedirs(screenshot_dir, exist_ok=True)
 
-    for attempt in range(1, MAX_RENEW_RETRIES_PER_URL + 1):
-        log(f"{'='*20} 续期尝试 {attempt}/{MAX_RENEW_RETRIES_PER_URL} {'='*20}")
-        page = None
-        browser = None
-        try:
-            with Camoufox(headless=False) as browser:
-                page = browser.new_page()
-
-                log(f"访问: {url}")
-                for retry in range(3):
-                    try:
-                        page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                        break
-                    except Exception:
-                        if retry < 2:
-                            time.sleep(2)
-                        else:
-                            raise
-                time.sleep(random.uniform(5, 8))
-
-                server_name = get_server_name(page)
-                old_expire = get_expire_time(page)
-                log(f"服务器: {server_name}, 到期时间: {old_expire}")
-
-                page.evaluate("""
-                    const cssSelectors = ['ins.adsbygoogle', 'iframe[src*="ads"]', '.modal-backdrop'];
-                    cssSelectors.forEach(sel => {
-                        document.querySelectorAll(sel).forEach(el => el.remove());
-                    });
-                """)
-                time.sleep(2)
+    try:
+        with Camoufox(headless=False) as browser:
+            for attempt in range(1, MAX_RENEW_RETRIES_PER_URL + 1):
+                log(f"{'='*20} 续期尝试 {attempt}/{MAX_RENEW_RETRIES_PER_URL} {'='*20}")
+                page = None
                 try:
-                    consent_btn = page.get_by_role('button', name='Consent')
-                    consent_btn.wait_for(state='visible', timeout=2000)
-                    consent_btn.click()
+                    page = browser.new_page()
+
+                    log(f"访问: {url}")
+                    for retry in range(3):
+                        try:
+                            page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                            break
+                        except Exception:
+                            if retry < 2:
+                                time.sleep(2)
+                            else:
+                                raise
+                    time.sleep(random.uniform(5, 8))
+
+                    server_name = get_server_name(page)
+                    old_expire = get_expire_time(page)
+                    log(f"服务器: {server_name}, 到期时间: {old_expire}")
+
+                    page.evaluate("""
+                        const cssSelectors = ['ins.adsbygoogle', 'iframe[src*="ads"]', '.modal-backdrop'];
+                        cssSelectors.forEach(sel => {
+                            document.querySelectorAll(sel).forEach(el => el.remove());
+                        });
+                    """)
+                    time.sleep(2)
+                    try:
+                        consent_btn = page.get_by_role('button', name='Consent')
+                        consent_btn.wait_for(state='visible', timeout=2000)
+                        consent_btn.click()
+                        time.sleep(3)
+                    except Exception:
+                        pass
+
+                    for _ in range(3):
+                        scroll_y = random.randint(200, 600)
+                        page.mouse.wheel(0, scroll_y)
+                        time.sleep(random.uniform(0.5, 1.5))
+                        page.mouse.move(random.randint(100, 800), random.randint(100, 500))
+                        time.sleep(random.uniform(0.5, 1.0))
+                    time.sleep(random.uniform(1.0, 2.0))
+
+                    log("打开续期弹窗...")
+                    renew_btn1 = safe_locate(page, 'xpath=//button[contains(text(), "Renew server")]', 3000)
+                    if renew_btn1:
+                        try:
+                            renew_btn1.click()
+                        except Exception:
+                            renew_btn1.click(force=True)
+                    else:
+                        page.evaluate("document.querySelectorAll('button').forEach(b => {if(b.textContent.includes('Renew server')) b.click();});")
                     time.sleep(3)
-                except Exception:
-                    pass
 
-                for _ in range(3):
-                    scroll_y = random.randint(200, 600)
-                    page.mouse.wheel(0, scroll_y)
-                    time.sleep(random.uniform(0.5, 1.5))
-                    page.mouse.move(random.randint(100, 800), random.randint(100, 500))
-                    time.sleep(random.uniform(0.5, 1.0))
-                time.sleep(random.uniform(1.0, 2.0))
+                    for _ in range(8):
+                        try:
+                            el = page.get_by_text('Expires in:', exact=False)
+                            el.wait_for(state='visible', timeout=500)
+                            break
+                        except Exception:
+                            pass
+                        try:
+                            el = page.get_by_text('Deletes on:', exact=False)
+                            el.wait_for(state='visible', timeout=500)
+                            break
+                        except Exception:
+                            pass
+                        time.sleep(1)
 
-                log("打开续期弹窗...")
-                renew_btn1 = safe_locate(page, 'xpath=//button[contains(text(), "Renew server")]', 3000)
-                if renew_btn1:
-                    try:
-                        renew_btn1.click()
-                    except Exception:
-                        renew_btn1.click(force=True)
-                else:
-                    page.evaluate("document.querySelectorAll('button').forEach(b => {if(b.textContent.includes('Renew server')) b.click();});")
-                time.sleep(3)
+                    renew_btn2 = safe_locate(page, 'xpath=//button[contains(text(), "Renew server")]', 2000)
+                    if renew_btn2:
+                        try:
+                            renew_btn2.click()
+                        except Exception:
+                            renew_btn2.click(force=True)
+                    time.sleep(random.uniform(7, 10))
 
-                for _ in range(8):
-                    try:
-                        el = page.get_by_text('Expires in:', exact=False)
-                        el.wait_for(state='visible', timeout=500)
-                        break
-                    except Exception:
-                        pass
-                    try:
-                        el = page.get_by_text('Deletes on:', exact=False)
-                        el.wait_for(state='visible', timeout=500)
-                        break
-                    except Exception:
-                        pass
-                    time.sleep(1)
-
-                renew_btn2 = safe_locate(page, 'xpath=//button[contains(text(), "Renew server")]', 2000)
-                if renew_btn2:
-                    try:
-                        renew_btn2.click()
-                    except Exception:
-                        renew_btn2.click(force=True)
-                time.sleep(random.uniform(7, 10))
-
-                anchor_frame = find_recaptcha_frame(page, "anchor")
-                if not anchor_frame:
-                    log("未检测到 reCAPTCHA，检查是否已直接成功")
-                    new_expire = get_expire_time(page)
-                    if new_expire != old_expire and new_expire != "未知":
-                        success = True
-                    else:
-                        failure_reason = "未找到 reCAPTCHA 验证码区域"
-                    break
-
-                log("启动 reCAPTCHA 音频破解...")
-                try:
-                    solved = solve_recaptcha(page)
-                except CaptchaBlocked:
-                    log("IP 被封锁，换 IP 后重试", "WARN")
-                    failure_reason = "IP 被 reCAPTCHA 封锁"
-                    if attempt < MAX_RENEW_RETRIES_PER_URL:
-                        restart_warp()
-                        continue
-                    break
-                except RuntimeError as e:
-                    log(f"reCAPTCHA 破解失败: {e}", "WARN")
-                    failure_reason = str(e)[:100]
-                    if attempt < MAX_RENEW_RETRIES_PER_URL:
-                        restart_warp()
-                        continue
-                    break
-
-                if not solved:
-                    failure_reason = "未通过 reCAPTCHA 验证"
-                    break
-
-                log("点击最终 Renew 按钮")
-                final_btn = safe_locate(page, 'xpath=//button[normalize-space(text())="Renew"]', 3000)
-                if final_btn:
-                    try:
-                        final_btn.click()
-                    except Exception:
-                        final_btn.click(force=True)
-                    time.sleep(10)
-                    new_expire = get_expire_time(page)
-                    if new_expire != old_expire and new_expire != "未知":
-                        log(f"到期时间已更新: {old_expire} -> {new_expire}")
-                        success = True
-                    else:
-                        page_text = (page.content() or "").lower()
-                        if any(w in page_text for w in ["successfully", "renewed"]):
+                    anchor_frame = find_recaptcha_frame(page, "anchor")
+                    if not anchor_frame:
+                        log("未检测到 reCAPTCHA，检查是否已直接成功")
+                        new_expire = get_expire_time(page)
+                        if new_expire != old_expire and new_expire != "未知":
                             success = True
                         else:
-                            failure_reason = "续期后未检测到成功标志"
-                else:
-                    failure_reason = "找不到最终 Renew 按钮"
-                break
+                            failure_reason = "未找到 reCAPTCHA 验证码区域"
+                        break
 
-        except Exception as e:
-            log(f"续期尝试异常: {e}", "ERROR")
-            failure_reason = f"运行异常: {str(e)[:200]}"
-            if attempt < MAX_RENEW_RETRIES_PER_URL:
-                restart_warp()
-                continue
-            break
-        finally:
-            if page:
-                try:
-                    screen_name = f"host2play-{server_name}-{'success' if success else 'fail'}.png"
-                    extra_info = f"状态: {'成功' if success else '失败'}"
-                    if failure_reason:
-                        extra_info += f" | 原因: {failure_reason}"
-                    screenshot_path = capture_page_screenshot(
-                        page,
-                        os.path.join(screenshot_dir, screen_name),
-                        extra_info
-                    )
-                except Exception:
-                    pass
-                try:
-                    page.close()
-                except Exception:
-                    pass
-            if browser:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+                    log("启动 reCAPTCHA 音频破解...")
+                    try:
+                        solved = solve_recaptcha(page)
+                    except CaptchaBlocked:
+                        log("IP 被封锁，换 IP 后重试", "WARN")
+                        failure_reason = "IP 被 reCAPTCHA 封锁"
+                        restart_warp()
+                        continue
+                    except RuntimeError as e:
+                        log(f"reCAPTCHA 破解失败: {e}", "WARN")
+                        failure_reason = str(e)[:100]
+                        restart_warp()
+                        continue
+
+                    if not solved:
+                        failure_reason = "未通过 reCAPTCHA 验证"
+                        break
+
+                    log("点击最终 Renew 按钮")
+                    final_btn = safe_locate(page, 'xpath=//button[normalize-space(text())="Renew"]', 3000)
+                    if final_btn:
+                        try:
+                            final_btn.click()
+                        except Exception:
+                            final_btn.click(force=True)
+                        time.sleep(10)
+                        new_expire = get_expire_time(page)
+                        if new_expire != old_expire and new_expire != "未知":
+                            log(f"到期时间已更新: {old_expire} -> {new_expire}")
+                            success = True
+                        else:
+                            page_text = (page.content() or "").lower()
+                            if any(w in page_text for w in ["successfully", "renewed"]):
+                                success = True
+                            else:
+                                failure_reason = "续期后未检测到成功标志"
+                    else:
+                        failure_reason = "找不到最终 Renew 按钮"
+                    break
+
+                except Exception as e:
+                    log(f"续期尝试异常: {e}", "ERROR")
+                    failure_reason = f"运行异常: {str(e)[:200]}"
+                    restart_warp()
+                    continue
+                finally:
+                    if page:
+                        try:
+                            screen_name = f"host2play-{server_name}-{'success' if success else 'fail'}.png"
+                            extra_info = f"状态: {'成功' if success else '失败'}"
+                            if failure_reason:
+                                extra_info += f" | 原因: {failure_reason}"
+                            screenshot_path = capture_page_screenshot(
+                                page,
+                                os.path.join(screenshot_dir, screen_name),
+                                extra_info
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+
+    except Exception as e:
+        log(f"Camoufox 启动失败: {e}", "ERROR")
+        failure_reason = f"浏览器启动失败: {str(e)[:200]}"
 
     return success, server_name, old_expire, new_expire, screenshot_path, failure_reason
 

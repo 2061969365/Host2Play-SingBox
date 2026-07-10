@@ -60,7 +60,7 @@ jobs:
           SUB_URL: ${{ secrets.SUB_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: python main.py
+        run: xvfb-run python main.py
 
       - name: 上传截图
         if: always()

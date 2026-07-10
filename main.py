@@ -206,6 +206,8 @@ def parse_single_uri(uri):
         return parse_ss(uri)
     elif uri.startswith("trojan://"):
         return parse_trojan(uri)
+    elif uri.startswith("tuic://"):
+        return parse_tuic(uri)
     elif uri.startswith("socks5://") or uri.startswith("http://"):
         return parse_socks5(uri)
     else:
@@ -268,7 +270,6 @@ def parse_vless(uri):
         if security == "reality":
             reality_pbk = p("pbk", "")
             reality_sid = p("sid", "")
-            reality_spx = p("spx", "")
             sni = p("sni", server)
             fingerprint = p("fp", "chrome")
 
@@ -283,8 +284,6 @@ def parse_vless(uri):
             }
             if reality_sid:
                 tls_config["reality"]["short_id"] = reality_sid
-            if reality_spx:
-                tls_config["reality"]["server_spider_x"] = reality_spx
 
             outbound["tls"] = tls_config
 
@@ -626,6 +625,49 @@ def parse_trojan(uri):
         log(f"解析 trojan URI 失败: {e}", "WARN")
         return None
 
+def parse_tuic(uri):
+    """解析 tuic://uuid:password@host:port?params"""
+    try:
+        rest = uri[7:]
+        if '#' in rest:
+            rest, name = rest.rsplit('#', 1); name = unquote(name)
+        else:
+            name = "tuic-node"
+        if '?' in rest:
+            addr, ps = rest.split('?', 1)
+        else:
+            addr, ps = rest, ""
+        if '@' not in addr:
+            return None
+        creds, hp = addr.rsplit('@', 1)
+        creds = unquote(creds)
+        if ':' in creds:
+            uuid, password = creds.split(':', 1)
+        else:
+            uuid, password = creds, ""
+        if ':' in hp:
+            srv, prt = hp.rsplit(':', 1); prt = int(prt)
+        else:
+            srv, prt = hp, 443
+        pp = parse_qs(ps)
+        def p(k, d=None):
+            v = pp.get(k); return v[0] if v else d
+        out = {"type": "tuic", "tag": name, "server": srv, "server_port": prt,
+               "uuid": uuid, "password": password,
+               "congestion_control": p("congestion_control", "bbr"),
+               "udp_relay_mode": p("udp_relay_mode", "native")}
+        out["tls"] = {"enabled": True, "server_name": p("sni", srv),
+                      "insecure": p("allow_insecure", "0") in ("1", "true", "yes")}
+        alpn = p("alpn", "")
+        if alpn:
+            out["tls"]["alpn"] = [a.strip() for a in alpn.split(",")]
+        if p("disable_ns", "0") in ("1", "true", "yes"):
+            out["zero_rtt_handshake"] = False
+        return out
+    except Exception as e:
+        log(f"解析 tuic URI 失败: {e}", "WARN")
+        return None
+
 def parse_socks5(uri):
     """解析 socks5:// URI"""
     try:
@@ -782,6 +824,11 @@ class SingBoxManager:
     def start(self, outbound):
         """用指定 outbound 启动 sing-box"""
         self.stop()
+
+        # 跳过非 Reality 节点的 TLS 证书验证（节点证书通常无 SAN）
+        tls = outbound.get("tls", {})
+        if tls.get("enabled") and not tls.get("reality", {}).get("enabled") and not tls.get("insecure"):
+            outbound["tls"] = {**tls, "insecure": True}
 
         config = {
             "log": {"level": "error"},
@@ -1658,23 +1705,45 @@ def main():
         xray_mgr = XrayManager() if XRAY_BIN else None
         node_pool = NodePool(primary_uri=primary_uri, sub_url=sub_url)
 
-        outbound = node_pool.get_next_node()
-        if outbound:
+        # 尝试所有主节点
+        primary_count = len(node_pool.primary_nodes) if node_pool else 0
+        for attempt in range(primary_count if primary_count > 0 else 1):
+            outbound = node_pool.get_next_node() if primary_count > 0 else None
+            if not outbound:
+                break
+
             proxy_mgr, kernel = select_proxy_manager(outbound, sing_box, xray_mgr)
             log(f"使用内核: {kernel}")
             if proxy_mgr.start(outbound) and proxy_mgr.check(target_url=RENEW_URLS[0]):
                 proxy_available = True
                 log("代理模式就绪")
-            else:
-                log(f"{kernel} 不可用，尝试切换内核...", "WARN")
-                proxy_mgr.stop()
-                alt_mgr, _ = select_proxy_manager(outbound, sing_box, xray_mgr)
-                if alt_mgr and alt_mgr != proxy_mgr and alt_mgr.start(outbound) and alt_mgr.check(target_url=RENEW_URLS[0]):
+                break
+
+            log(f"{kernel} 不可用，尝试切换内核...", "WARN")
+            proxy_mgr.stop()
+            alt_mgr, _ = select_proxy_manager(outbound, sing_box, xray_mgr)
+            if alt_mgr and alt_mgr is not proxy_mgr:
+                if alt_mgr.start(outbound) and alt_mgr.check(target_url=RENEW_URLS[0]):
                     proxy_mgr = alt_mgr
                     proxy_available = True
                     log("代理模式就绪（备用内核）")
-                else:
-                    log("所有内核不可用，尝试备用节点...", "WARN")
+                    break
+
+            log(f"节点 {outbound.get('tag', '?')} 不可用，试下一个", "WARN")
+
+        # 主节点全失败时试备用节点（最多 3 个）
+        if not proxy_available and node_pool and node_pool.has_backup():
+            log("主节点不可用，尝试备用节点...", "WARN")
+            for _ in range(min(3, len(node_pool.backup_nodes))):
+                outbound = node_pool.get_next_node(force_backup=True)
+                if not outbound:
+                    break
+                proxy_mgr, kernel = select_proxy_manager(outbound, sing_box, xray_mgr)
+                if proxy_mgr.start(outbound) and proxy_mgr.check(target_url=RENEW_URLS[0]):
+                    proxy_available = True
+                    log("代理模式就绪（备用节点）")
+                    break
+                proxy_mgr.stop()
 
     if not proxy_available and node_pool:
         log("所有节点不可用，后续将使用 WARP 直连", "WARN")

@@ -544,12 +544,11 @@ def renew_single_url(url):
 
     try:
         with Camoufox(headless=False) as browser:
+            page = browser.new_page(no_viewport=True)
+            page.set_viewport_size({"width": 1280, "height": 720})
             for attempt in range(1, MAX_RENEW_RETRIES_PER_URL + 1):
                 log(f"{'='*20} 续期尝试 {attempt}/{MAX_RENEW_RETRIES_PER_URL} {'='*20}")
-                page = None
                 try:
-                    page = browser.new_page()
-
                     log(f"访问: {url}")
                     for retry in range(3):
                         try:
@@ -631,6 +630,7 @@ def renew_single_url(url):
                             success = True
                         else:
                             failure_reason = "未找到 reCAPTCHA 验证码区域"
+                        screenshot_path = capture_page_screenshot(page, os.path.join(screenshot_dir, f"host2play-{server_name}-{'success' if success else 'fail'}.png"), f"状态: {'成功' if success else '失败'}" + (f" | 原因: {failure_reason}" if failure_reason else ""))
                         break
 
                     log("启动 reCAPTCHA 音频破解...")
@@ -649,6 +649,7 @@ def renew_single_url(url):
 
                     if not solved:
                         failure_reason = "未通过 reCAPTCHA 验证"
+                        screenshot_path = capture_page_screenshot(page, os.path.join(screenshot_dir, f"host2play-{server_name}-fail.png"), f"状态: 失败 | 原因: {failure_reason}")
                         break
 
                     log("点击最终 Renew 按钮")
@@ -671,6 +672,7 @@ def renew_single_url(url):
                                 failure_reason = "续期后未检测到成功标志"
                     else:
                         failure_reason = "找不到最终 Renew 按钮"
+                    screenshot_path = capture_page_screenshot(page, os.path.join(screenshot_dir, f"host2play-{server_name}-{'success' if success else 'fail'}.png"), f"状态: {'成功' if success else '失败'}" + (f" | 原因: {failure_reason}" if failure_reason else ""))
                     break
 
                 except Exception as e:
@@ -678,24 +680,6 @@ def renew_single_url(url):
                     failure_reason = f"运行异常: {str(e)[:200]}"
                     restart_warp()
                     continue
-                finally:
-                    if page:
-                        try:
-                            screen_name = f"host2play-{server_name}-{'success' if success else 'fail'}.png"
-                            extra_info = f"状态: {'成功' if success else '失败'}"
-                            if failure_reason:
-                                extra_info += f" | 原因: {failure_reason}"
-                            screenshot_path = capture_page_screenshot(
-                                page,
-                                os.path.join(screenshot_dir, screen_name),
-                                extra_info
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            page.close()
-                        except Exception:
-                            pass
 
     except Exception as e:
         log(f"Camoufox 启动失败: {e}", "ERROR")

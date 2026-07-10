@@ -543,8 +543,9 @@ def renew_single_url(url):
     os.makedirs(screenshot_dir, exist_ok=True)
 
     try:
-        with Camoufox(headless=False) as browser:
-            page = browser.new_page()
+        with Camoufox(headless=True) as browser:
+            context = browser.new_context(no_viewport=True)
+            page = context.new_page()
             for attempt in range(1, MAX_RENEW_RETRIES_PER_URL + 1):
                 log(f"{'='*20} 续期尝试 {attempt}/{MAX_RENEW_RETRIES_PER_URL} {'='*20}")
                 try:

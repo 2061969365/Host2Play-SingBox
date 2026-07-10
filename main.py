@@ -28,7 +28,7 @@ RENEW_URLS = [
     "https://host2play.gratis/server/renew?i=113a35f1-2942-4e08-b3e5-1e8fe5df22ee"
 ]
 
-MAX_CAPTCHA = 3
+MAX_CAPTCHA = 5
 MAX_RENEW_RETRIES_PER_URL = 10
 SING_BOX_PORT = 1080
 CONFIG_PATH = "/tmp/sing-box-config.json"
@@ -949,7 +949,6 @@ def restart_proxy(proxy_mgr, node_pool, force_backup=False, target_url=None):
     return restart_proxy(proxy_mgr, node_pool, force_backup=True, target_url=target_url)
 
 # reCAPTCHA 辅助函数
-# reCAPTCHA 辅助函数
 # ==============================================================================
 def find_recaptcha_frame(page, kind):
     try:
@@ -1179,14 +1178,46 @@ def download_audio(url):
             pass
     return None
 
+def preprocess_audio(wav_path):
+    try:
+        audio = AudioSegment.from_file(wav_path)
+        audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        audio = audio.normalize()
+        try:
+            if len(audio) > 100:
+                audio = audio.high_pass_filter(200).low_pass_filter(3500)
+        except Exception:
+            pass
+        audio.export(wav_path, format="wav")
+    except Exception:
+        pass
+
 def recognize_audio(mp3_path):
     try:
         wav_path = mp3_path.replace(".mp3", ".wav")
         AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
+        preprocess_audio(wav_path)
         recognizer = sr.Recognizer()
         with sr.AudioFile(wav_path) as src:
             audio_data = recognizer.record(src)
-            text = recognizer.recognize_google(audio_data)
+            text = recognizer.recognize_google(audio_data, language="en-US")
+        try:
+            os.remove(wav_path)
+        except Exception:
+            pass
+        if text:
+            return text
+    except Exception:
+        pass
+    try:
+        wav_path = mp3_path.replace(".mp3", ".wav")
+        if not os.path.isfile(wav_path):
+            AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
+            preprocess_audio(wav_path)
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as src:
+            audio_data = recognizer.record(src)
+            text = recognizer.recognize_sphinx(audio_data)
         try:
             os.remove(wav_path)
         except Exception:
@@ -1389,13 +1420,29 @@ def renew_single_url(url, proxy_mgr, node_pool, use_proxy=True):
                 try:
                     solved = solve_recaptcha(page)
                 except CaptchaBlocked:
-                    log("IP 被封锁，换节点后重试", "WARN")
+                    log("IP 被封锁，等待 30s 后换节点重试", "WARN")
                     failure_reason = "IP 被 reCAPTCHA 封锁"
                     try:
                         page.quit()
                     except Exception:
                         pass
                     page = None
+                    time.sleep(30)
+                    if attempt < MAX_RENEW_RETRIES_PER_URL:
+                        if use_proxy and proxy_mgr:
+                            force_backup = (attempt > 3)
+                            restart_proxy(proxy_mgr, node_pool, force_backup=force_backup, target_url=url)
+                        continue
+                    break
+                except RuntimeError as e:
+                    log(f"reCAPTCHA 破解失败: {e}", "WARN")
+                    failure_reason = str(e)[:100]
+                    if page:
+                        try:
+                            page.quit()
+                        except Exception:
+                            pass
+                        page = None
                     if attempt < MAX_RENEW_RETRIES_PER_URL:
                         if use_proxy and proxy_mgr:
                             force_backup = (attempt > 3)

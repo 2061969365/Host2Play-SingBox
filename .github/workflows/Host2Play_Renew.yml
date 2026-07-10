@@ -37,22 +37,16 @@ jobs:
       - name: 下载 Camoufox 浏览器
         run: python -m camoufox fetch
 
-      # - name: 启用 WARP 网络（兜底用）
-      #   uses: fscarmen/warp-on-actions@v1.3
-      #   with:
-      #     stack: dual
-      #     mode: client
+      - name: 启用 WARP 网络
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
 
-      # - name: 修复 DNS
-      #   run: |
-      #     echo "[INFO] DNS 测试:"
-      #     nslookup host2play.gratis 1.1.1.1 || echo "[WARN] 解析失败"
-
-      - name: 安装 sing-box
+      - name: 修复 DNS
         run: |
-          wget -q -O /tmp/sing-box.deb https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box_1.13.14_linux_amd64.deb
-          sudo dpkg -i /tmp/sing-box.deb
-          sing-box version
+          echo "[INFO] DNS 测试:"
+          nslookup host2play.gratis 1.1.1.1 || echo "[WARN] 解析失败"
 
       - name: 执行续订
         env:
@@ -60,7 +54,7 @@ jobs:
           SUB_URL: ${{ secrets.SUB_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: xvfb-run python main.py
+        run: python main.py
 
       - name: 上传截图
         if: always()

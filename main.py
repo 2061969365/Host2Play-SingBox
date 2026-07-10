@@ -544,8 +544,7 @@ def renew_single_url(url):
 
     try:
         with Camoufox(headless=False) as browser:
-            page = browser.new_page(no_viewport=True)
-            page.set_viewport_size({"width": 1280, "height": 720})
+            page = browser.new_page()
             for attempt in range(1, MAX_RENEW_RETRIES_PER_URL + 1):
                 log(f"{'='*20} 续期尝试 {attempt}/{MAX_RENEW_RETRIES_PER_URL} {'='*20}")
                 try:

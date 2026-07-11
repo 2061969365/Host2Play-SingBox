@@ -648,6 +648,82 @@ def parse_trojan(uri):
         log(f"解析 trojan URI 失败: {e}", "WARN")
         return None
 
+TEST_CONFIG = WORK_DIR / "sing-box-test-config.json"
+
+def test_proxy_node(outbound, timeout=15):
+    sb_bin = None
+    for p in ["/usr/bin/sing-box", "/usr/local/bin/sing-box"]:
+        if os.path.exists(p):
+            sb_bin = p
+            break
+    if not sb_bin:
+        log("sing-box 未安装，无法测试节点", "ERROR")
+        return False, "sing-box 未安装", "0.00s"
+
+    config = {
+        "log": {"level": "error"},
+        "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": SINGBOX_PORT}],
+        "outbounds": [outbound, {"type": "direct", "tag": "direct"}],
+        "route": {"final": outbound.get("tag", "proxy")}
+    }
+    TEST_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    TEST_CONFIG.write_text(json.dumps(config, indent=2))
+
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [sb_bin, "run", "-c", str(TEST_CONFIG)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            preexec_fn=os.setsid
+        )
+        time.sleep(3)
+        if proc.poll() is not None:
+            stderr = proc.stderr.read().decode()[:200]
+            return False, f"sing-box 启动失败: {stderr}", "0.00s"
+        for _ in range(10):
+            try:
+                s = socket.create_connection(("127.0.0.1", SINGBOX_PORT), timeout=1)
+                s.close()
+                break
+            except Exception:
+                time.sleep(1)
+        else:
+            return False, "SOCKS5 端口未监听", "0.00s"
+
+        start = time.time()
+        result = subprocess.run(
+            ["curl", "-s", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", str(timeout),
+             "--socks5-hostname", f"127.0.0.1:{SINGBOX_PORT}",
+             "https://host2play.gratis/"],
+            capture_output=True, text=True, timeout=timeout + 5
+        )
+        elapsed = time.time() - start
+        code = result.stdout.strip()
+        ok = code not in ("", "000") and code.isdigit()
+        if ok:
+            return True, f"HTTP {code}", f"{elapsed:.2f}s"
+        stderr = result.stderr.strip()[:60]
+        return False, stderr or f"HTTP {code}", f"{elapsed:.2f}s"
+    except subprocess.TimeoutExpired:
+        return False, "超时", f"{timeout}.00s"
+    except Exception as e:
+        return False, str(e)[:40], "0.00s"
+    finally:
+        if proc:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+        try:
+            TEST_CONFIG.unlink()
+        except Exception:
+            pass
+
 class ProxyManager:
     def __init__(self, sub_url):
         self.sub_url = sub_url
@@ -709,14 +785,30 @@ class ProxyManager:
         if not uris:
             log("未解析到任何节点 URI", "WARN")
             return
+        parsed = []
         for uri in uris:
             ob = parse_proxy_uri(uri)
             if ob:
-                self.proxy_nodes.append(ob)
-        log(f"解析到 {len(self.proxy_nodes)} 个有效节点 (共 {len(uris)} 个 URI)")
+                parsed.append(ob)
+        log(f"解析到 {len(parsed)} 个节点，开始连通性测试...")
+        valid = []
+        for i, ob in enumerate(parsed):
+            tag = ob.get('tag', '?')
+            addr = f"{ob.get('server','?')}:{ob.get('server_port','?')}"
+            log(f"测试节点 [{i+1}/{len(parsed)}] {tag} ({addr})...")
+            ok, status, latency = test_proxy_node(ob)
+            if ok:
+                log(f"  -> 有效 ({status}, {latency})")
+                valid.append(ob)
+            else:
+                log(f"  -> 失效 ({status}, {latency})", "WARN")
+        self.proxy_nodes = valid
+        log(f"节点测试完成: {len(self.proxy_nodes)} 有效 / {len(parsed)} 总计")
         if self.proxy_nodes:
             n = self.proxy_nodes[0]
-            log(f"当前节点: [{n.get('tag','?')}] {n.get('type','?')} -> {n.get('server','?')}:{n.get('server_port','?')}")
+            log(f"首个有效节点: [{n.get('tag','?')}] {n.get('type','?')} -> {n.get('server','?')}:{n.get('server_port','?')}")
+        else:
+            log("无有效节点，将直连 WARP", "WARN")
 
     def _register_warp(self):
         log("注册 WARP WireGuard...")
@@ -858,8 +950,11 @@ class ProxyManager:
 
     def switch_proxy_and_restart(self):
         if not self.proxy_nodes:
-            log("无代理节点可切换", "WARN")
-            return False
+            log("无有效代理节点，回退到直连 WARP", "WARN")
+            self._stop_singbox()
+            self.current_proxy_idx = 9999
+            self._start_singbox()
+            return True
         self._stop_singbox()
         self.current_proxy_idx = (self.current_proxy_idx + 1) % len(self.proxy_nodes)
         log(f"切换到代理 [{self.current_proxy_idx + 1}/{len(self.proxy_nodes)}]")

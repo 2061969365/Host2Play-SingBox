@@ -678,31 +678,38 @@ class ProxyManager:
         if not self.sub_url:
             log("未配置 SUB_URL，将直连 WARP（无代理隧道）", "WARN")
             return
-        log(f"获取订阅节点: {self.sub_url[:60]}...")
-        try:
-            r = requests.get(self.sub_url, timeout=30)
-            r.raise_for_status()
-            text = r.text.strip()
+        raw = self.sub_url.strip()
+        uris = []
+        if '://' in raw and not raw.startswith('http'):
+            log("检测到单节点 URI，直接解析")
+            uris = [raw]
+        else:
+            log(f"获取订阅: {raw[:60]}...")
             try:
-                pad = 4 - len(text) % 4
-                if pad != 4:
-                    text += '=' * pad
-                decoded = base64.b64decode(text).decode('utf-8')
-                if any(c in decoded for c in [':', '/', '\n']):
-                    text = decoded
-            except Exception:
-                pass
-            uris = [u.strip() for u in text.splitlines() if u.strip() and '://' in u]
-            for uri in uris:
-                ob = parse_proxy_uri(uri)
-                if ob:
-                    self.proxy_nodes.append(ob)
-            log(f"解析到 {len(self.proxy_nodes)} 个有效节点 (共 {len(uris)} 个 URI)")
-            if self.proxy_nodes:
-                n = self.proxy_nodes[0]
-                log(f"当前节点: [{n.get('tag','?')}] {n.get('type','?')} -> {n.get('server','?')}:{n.get('server_port','?')}")
-        except Exception as e:
-            log(f"获取订阅失败: {e}", "ERROR")
+                r = requests.get(raw, timeout=30)
+                r.raise_for_status()
+                text = r.text.strip()
+                try:
+                    pad = 4 - len(text) % 4
+                    if pad != 4:
+                        text += '=' * pad
+                    decoded = base64.b64decode(text).decode('utf-8')
+                    if any(c in decoded for c in [':', '/', '\n']):
+                        text = decoded
+                except Exception:
+                    pass
+                uris = [u.strip() for u in text.splitlines() if u.strip() and '://' in u]
+            except Exception as e:
+                log(f"获取订阅失败: {e}", "ERROR")
+                return
+        for uri in uris:
+            ob = parse_proxy_uri(uri)
+            if ob:
+                self.proxy_nodes.append(ob)
+        log(f"解析到 {len(self.proxy_nodes)} 个有效节点 (共 {len(uris)} 个 URI)")
+        if self.proxy_nodes:
+            n = self.proxy_nodes[0]
+            log(f"当前节点: [{n.get('tag','?')}] {n.get('type','?')} -> {n.get('server','?')}:{n.get('server_port','?')}")
 
     def _register_warp(self):
         log("注册 WARP WireGuard...")

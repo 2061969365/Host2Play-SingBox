@@ -745,10 +745,19 @@ class ProxyManager:
         if WGCF_PATH.exists():
             return
         log("下载 wgcf...")
-        r = requests.get(WGCF_URL, timeout=60)
-        WGCF_PATH.write_bytes(r.content)
-        WGCF_PATH.chmod(0o755)
-        log("wgcf 下载完成")
+        for attempt in range(3):
+            try:
+                r = requests.get(WGCF_URL, timeout=120)
+                r.raise_for_status()
+                WGCF_PATH.write_bytes(r.content)
+                WGCF_PATH.chmod(0o755)
+                log("wgcf 下载完成")
+                return
+            except Exception as e:
+                log(f"下载 wgcf 失败 (尝试 {attempt+1}/3): {e}", "WARN")
+                if attempt < 2:
+                    time.sleep(5)
+        raise RuntimeError("wgcf 下载失败 (3次重试)")
 
     def _fetch_proxies(self):
         if not self.sub_url:

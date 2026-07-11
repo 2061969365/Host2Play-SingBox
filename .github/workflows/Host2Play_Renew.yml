@@ -46,6 +46,7 @@ jobs:
           SUB_URL: ${{ secrets.SUB_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SING_BOX_EXPERIMENTAL: 1
         run: python main.py
 
       - name: 上传截图

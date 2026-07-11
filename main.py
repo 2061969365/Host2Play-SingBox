@@ -669,12 +669,14 @@ def test_proxy_node(outbound, timeout=15):
     TEST_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     TEST_CONFIG.write_text(json.dumps(config, indent=2))
 
+    env = os.environ.copy()
+    env["SING_BOX_EXPERIMENTAL"] = "1"
     proc = None
     try:
         proc = subprocess.Popen(
             [sb_bin, "run", "-c", str(TEST_CONFIG)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            preexec_fn=os.setsid
+            preexec_fn=os.setsid, env=env
         )
         time.sleep(3)
         if proc.poll() is not None:
@@ -914,11 +916,13 @@ class ProxyManager:
         if not sb_bin:
             raise RuntimeError("sing-box 未安装 (需先 apt install)")
 
+        env = os.environ.copy()
+        env["SING_BOX_EXPERIMENTAL"] = "1"
         try:
             self.singbox_process = subprocess.Popen(
                 [sb_bin, "run", "-c", str(SINGBOX_CONFIG)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                preexec_fn=os.setsid
+                preexec_fn=os.setsid, env=env
             )
             time.sleep(3)
             if self.singbox_process.poll() is not None:

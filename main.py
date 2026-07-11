@@ -669,14 +669,12 @@ def test_proxy_node(outbound, timeout=15):
     TEST_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     TEST_CONFIG.write_text(json.dumps(config, indent=2))
 
-    env = os.environ.copy()
-    env["SING_BOX_EXPERIMENTAL"] = "1"
     proc = None
     try:
         proc = subprocess.Popen(
             [sb_bin, "run", "-c", str(TEST_CONFIG)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            preexec_fn=os.setsid, env=env
+            preexec_fn=os.setsid
         )
         time.sleep(3)
         if proc.poll() is not None:
@@ -867,15 +865,20 @@ class ProxyManager:
             raise RuntimeError("WARP 配置不完整")
 
     def _build_config(self):
-        warp_wg = {
+        endpoint_wg = {
             "type": "wireguard",
             "tag": "warp-wg",
-            "server": "engage.cloudflareclient.com",
-            "server_port": 2408,
-            "local_address": [self.warp_address],
+            "address": [self.warp_address],
             "private_key": self.warp_private_key,
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "reserved": self.warp_reserved or [0, 0, 0],
+            "peers": [
+                {
+                    "address": "engage.cloudflareclient.com",
+                    "port": 2408,
+                    "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                    "allowed_ips": ["0.0.0.0/0", "::/0"],
+                    "reserved": self.warp_reserved or [0, 0, 0],
+                }
+            ],
             "mtu": 1280,
         }
 
@@ -884,19 +887,18 @@ class ProxyManager:
         if self.current_proxy_idx < len(self.proxy_nodes):
             proxy = self.proxy_nodes[self.current_proxy_idx].copy()
             proxy["tag"] = "proxy-out"
-            warp_wg["detour"] = "proxy-out"
+            endpoint_wg["detour"] = "proxy-out"
             outbounds.insert(0, proxy)
             np = self.proxy_nodes[self.current_proxy_idx]
             log(f"WARP 隧道走代理: [{np.get('tag','?')}] {np.get('type','?')} -> {np.get('server','?')}:{np.get('server_port','?')}")
         else:
             log("WARP 直连（无代理隧道）")
 
-        outbounds.append(warp_wg)
-
         config = {
             "log": {"level": "error"},
             "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": SINGBOX_PORT}],
             "outbounds": outbounds,
+            "endpoints": [endpoint_wg],
             "route": {"final": "warp-wg"}
         }
 
@@ -916,13 +918,11 @@ class ProxyManager:
         if not sb_bin:
             raise RuntimeError("sing-box 未安装 (需先 apt install)")
 
-        env = os.environ.copy()
-        env["SING_BOX_EXPERIMENTAL"] = "1"
         try:
             self.singbox_process = subprocess.Popen(
                 [sb_bin, "run", "-c", str(SINGBOX_CONFIG)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                preexec_fn=os.setsid, env=env
+                preexec_fn=os.setsid
             )
             time.sleep(3)
             if self.singbox_process.poll() is not None:

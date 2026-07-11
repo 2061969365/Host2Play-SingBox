@@ -36,7 +36,7 @@ jobs:
 
       - name: 安装 sing-box
         run: |
-          wget -q -O /tmp/sing-box.deb https://github.com/SagerNet/sing-box/releases/download/v1.12.9/sing-box_1.12.9_linux_amd64.deb
+          wget -q -O /tmp/sing-box.deb https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box_1.13.14_linux_amd64.deb
           sudo dpkg -i /tmp/sing-box.deb
           echo "sing-box $(sing-box version 2>&1 | head -1)"
 
@@ -46,7 +46,6 @@ jobs:
           SUB_URL: ${{ secrets.SUB_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SING_BOX_EXPERIMENTAL: 1
         run: python main.py
 
       - name: 上传截图

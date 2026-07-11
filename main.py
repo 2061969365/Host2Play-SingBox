@@ -356,13 +356,20 @@ def renew_single_url(url):
 
                     # Click "Renew server" button to open modal
                     log("打开续期弹窗...")
+                    old_url = page.url
                     page.evaluate("""
                         const btns = document.querySelectorAll('button');
                         for (const b of btns) {
                             if (b.textContent.includes('Renew server')) { b.click(); break; }
                         }
+                        const links = document.querySelectorAll('a');
+                        for (const a of links) {
+                            if (a.textContent.includes('Renew server')) { a.click(); break; }
+                        }
                     """)
-                    time.sleep(random.uniform(5, 8))
+                    time.sleep(3)
+                    new_url = page.url
+                    log(f"URL 变化: {old_url} -> {new_url}")
 
                     # Wait for reCAPTCHA with longer retry
                     anchor_frame = None
@@ -373,12 +380,10 @@ def renew_single_url(url):
                         time.sleep(2)
                     if not anchor_frame:
                         log("未检测到 reCAPTCHA，截取当前页面状态...")
-                        modal_html = page.evaluate("document.querySelector('.modal-content')?.innerHTML.slice(0, 500) || '无弹窗内容'")
-                        body_html = page.evaluate("document.body.innerText.slice(0, 500)")
-                        log(f"弹窗内容: {modal_html[:200]}")
-                        log(f"页面文本: {body_html[:200]}")
-                        capture_screenshot(page, os.path.join(screenshot_dir, f"host2play-norecaptcha.png"), "未检测到 reCAPTCHA")
-                        failure_reason = "未找到 reCAPTCHA"
+                        page_source = page.evaluate("document.documentElement.outerHTML.slice(0, 3000)")
+                        log(f"页面 HTML 前 1000 字符: {page_source[:500]}")
+                        capture_screenshot(page, os.path.join(screenshot_dir, f"host2play-norecaptcha.png"), f"URL: {new_url}")
+                        failure_reason = f"未找到 reCAPTCHA, URL: {new_url}"
                         break
 
                     # Solve reCAPTCHA

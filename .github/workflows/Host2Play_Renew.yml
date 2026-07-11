@@ -34,16 +34,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install DrissionPage xvfbwrapper SpeechRecognition pydub requests
 
-      - name: 启用 WARP 网络
-        uses: fscarmen/warp-on-actions@v1.3
-        with:
-          stack: dual
-          mode: client
-
-      - name: 修复 DNS
+      - name: 安装 sing-box
         run: |
-          echo "[INFO] DNS 测试:"
-          nslookup host2play.gratis 1.1.1.1 || echo "[WARN] 解析失败"
+          wget -q -O /tmp/sing-box.deb https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box_1.13.14_linux_amd64.deb
+          sudo dpkg -i /tmp/sing-box.deb
+          echo "sing-box $(sing-box version 2>&1 | head -1)"
 
       - name: 执行续订
         env:

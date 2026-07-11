@@ -1,14 +1,21 @@
 import os
 import sys
 import time
+import json
+import re
+import base64
 import random
 import html
-import requests
 import tempfile
 import subprocess
+import signal
+import socket
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs, unquote
 from xvfbwrapper import Xvfb
 from DrissionPage import ChromiumPage, ChromiumOptions
+import requests
 
 try:
     import speech_recognition as sr
@@ -22,6 +29,14 @@ RENEW_URLS = [
 
 MAX_CAPTCHA = 5
 MAX_RENEW_RETRIES_PER_URL = 50
+
+WGCF_URL = "https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64"
+SINGBOX_PORT = 10809
+WORK_DIR = Path("work")
+WGCF_PATH = WORK_DIR / "wgcf"
+WGCF_ARCHIVE = WORK_DIR / "wgcf-account.toml"
+WGCF_PROFILE = WORK_DIR / "wgcf-profile.conf"
+SINGBOX_CONFIG = WORK_DIR / "sing-box-config.json"
 
 class CaptchaBlocked(Exception):
     pass
@@ -78,11 +93,11 @@ def get_expire_time(page):
 
 def build_notification(success, url, server_name, old_expire, new_expire=None, failure_reason=""):
     if success:
-        lines = ["✅ 续订成功", "", f"服务器：{server_name}", f"到期: {old_expire} -> {new_expire}", f"URL: {url}"]
+        lines = ["\u2705 \u7eed\u8ba2\u6210\u529f", "", f"\u670d\u52a1\u5668\uff1a{server_name}", f"\u5230\u671f: {old_expire} -> {new_expire}", f"URL: {url}"]
     else:
-        lines = ["❌ 续订失败", "", f"服务器：{server_name}", f"URL: {url}"]
+        lines = ["\u274c \u7eed\u8ba2\u5931\u8d25", "", f"\u670d\u52a1\u5668\uff1a{server_name}", f"URL: {url}"]
         if failure_reason:
-            lines.append(f"失败原因: {failure_reason}")
+            lines.append(f"\u5931\u8d25\u539f\u56e0: {failure_reason}")
     lines.append("")
     lines.append("Host2Play Auto Renew")
     return "\n".join(lines)
@@ -100,7 +115,7 @@ def capture_page_screenshot(page, file_name, extra_info=""):
             return None
         current_ip = get_current_ip()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        overlay_html = f'''<div id="info-overlay" style="position:fixed;top:10px;left:10px;background:rgba(0,0,0,0.85);color:#00ff00;padding:15px;border-radius:8px;font-family:monospace;font-size:14px;z-index:999999;border:2px solid #00ff00;max-width:400px;"><div style="color:#ffcc00;font-weight:bold;margin-bottom:8px;">[DEBUG INFO]</div><div>IP: {current_ip}</div><div>时间: {timestamp}</div>{f'<div style="color:#ff6666;">{extra_info}</div>' if extra_info else ''}</div>'''
+        overlay_html = f'''<div id="info-overlay" style="position:fixed;top:10px;left:10px;background:rgba(0,0,0,0.85);color:#00ff00;padding:15px;border-radius:8px;font-family:monospace;font-size:14px;z-index:999999;border:2px solid #00ff00;max-width:400px;"><div style="color:#ffcc00;font-weight:bold;margin-bottom:8px;">[DEBUG INFO]</div><div>IP: {current_ip}</div><div>\u65f6\u95f4: {timestamp}</div>{f'<div style="color:#ff6666;">{extra_info}</div>' if extra_info else ''}</div>'''
         page.run_js(f'''
             const old = document.getElementById('info-overlay');
             if (old) old.remove();
@@ -109,43 +124,11 @@ def capture_page_screenshot(page, file_name, extra_info=""):
         time.sleep(0.5)
         page.get_screenshot(path=file_name)
         page.run_js('const el = document.getElementById("info-overlay"); if(el) el.remove();')
-        log(f"截图已保存: {file_name} (IP: {current_ip})")
+        log(f"\u622a\u56fe\u5df2\u4fdd\u5b58: {file_name} (IP: {current_ip})")
         return file_name
     except Exception as e:
-        log(f"截图失败: {e}", "WARN")
+        log(f"\u622a\u56fe\u5931\u8d25: {e}", "WARN")
         return None
-
-def restart_warp():
-    log("正在重启 WARP 以更换 IP...")
-    screenshot_dir = "output/screenshots"
-    os.makedirs(screenshot_dir, exist_ok=True)
-    try:
-        old_ip = requests.get("https://api.ipify.org", timeout=10).text
-        log(f"当前 IP: {old_ip}")
-    except Exception:
-        old_ip = "未知"
-    try:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        capture_page_screenshot(None, os.path.join(screenshot_dir, f"warp-before-{ts}.png"), f"WARP 重连前 IP: {old_ip}")
-    except:
-        pass
-    try:
-        subprocess.run(["sudo", "warp-cli", "--accept-tos", "disconnect"], check=False, timeout=30, capture_output=True)
-        time.sleep(3)
-        try:
-            subprocess.run(["sudo", "warp-cli", "--accept-tos", "registration", "delete"], check=True, timeout=30, capture_output=True)
-        except subprocess.CalledProcessError:
-            log("删除注册失败（可能未注册）", "WARN")
-        subprocess.run(["sudo", "warp-cli", "--accept-tos", "registration", "new"], check=True, timeout=30, capture_output=True)
-        time.sleep(3)
-        subprocess.run(["sudo", "warp-cli", "--accept-tos", "connect"], check=True, timeout=30, capture_output=True)
-        time.sleep(10)
-        new_ip = requests.get("https://api.ipify.org", timeout=10).text
-        log(f"WARP 重连成功，新 IP: {old_ip} -> {new_ip}")
-        return True
-    except Exception as e:
-        log(f"WARP 重连失败: {e}", "ERROR")
-        return False
 
 def find_recaptcha_frame(page, kind):
     try:
@@ -445,7 +428,442 @@ def solve_recaptcha(page):
         time.sleep(random.uniform(2, 4))
     raise RuntimeError("验证码达到最大尝试次数")
 
-def renew_single_url(url):
+def parse_proxy_uri(uri):
+    uri = uri.strip()
+    if uri.startswith("vless://"):
+        return parse_vless(uri)
+    elif uri.startswith("vmess://"):
+        return parse_vmess(uri)
+    elif uri.startswith("ss://") or uri.startswith("ssconf://"):
+        return parse_ss(uri)
+    elif uri.startswith("trojan://"):
+        return parse_trojan(uri)
+    elif uri.startswith("tuic://"):
+        return parse_tuic(uri)
+    return None
+
+def parse_vless(uri):
+    try:
+        rest = uri[8:]
+        if '#' in rest:
+            rest, name = rest.rsplit('#', 1); name = unquote(name)
+        else:
+            name = "vless"
+        if '?' in rest:
+            addr, params_str = rest.split('?', 1)
+        else:
+            addr, params_str = rest, ""
+        if '@' not in addr:
+            return None
+        uuid, host_port = addr.split('@', 1)
+        if ':' in host_port:
+            server, port = host_port.rsplit(':', 1); port = int(port)
+        else:
+            server, port = host_port, 443
+        params = parse_qs(params_str)
+        def p(k, d=None):
+            v = params.get(k); return v[0] if v else d
+        out = {"type": "vless", "tag": name, "server": server, "server_port": port, "uuid": uuid}
+        flow = p("flow", "").lower()
+        if flow in ("xtls-rprx-vision", "xtls-rprx-vision-udp443"):
+            out["flow"] = flow
+        pe = p("packetEncoding", "")
+        if pe:
+            out["packet_encoding"] = pe
+        security = p("security", "")
+        tls_enabled = security in ("tls", "reality", "")
+        if security == "reality":
+            out["tls"] = {"enabled": True, "server_name": p("sni", server), "utls": {"enabled": True, "fingerprint": p("fp", "chrome")}, "reality": {"enabled": True, "public_key": p("pbk", ""), "short_id": [p("sid", "0123456789abcdef")]}}
+        elif tls_enabled:
+            tls_cfg = {"enabled": True, "server_name": p("sni", server)}
+            if p("insecure", "0") in ("1", "true", "yes") or p("allowInsecure", "0") in ("1", "true", "yes"):
+                tls_cfg["insecure"] = True
+            alpn = p("alpn", "")
+            if alpn:
+                tls_cfg["alpn"] = [a.strip() for a in alpn.split(",")]
+            fp = p("fp", "chrome")
+            if fp != "none":
+                tls_cfg["utls"] = {"enabled": True, "fingerprint": fp}
+            out["tls"] = tls_cfg
+        ttype = p("type", "tcp")
+        if ttype == "ws":
+            ws = {"type": "ws", "path": p("path", "/"), "headers": {"Host": p("host", server)}}
+            ed = p("ed", "")
+            if ed:
+                try: ws["max_early_data"] = int(ed)
+                except: pass
+            out["transport"] = ws
+        elif ttype == "grpc":
+            out["transport"] = {"type": "grpc", "service_name": p("serviceName", "")}
+        elif ttype == "tcp" and p("headerType", "none") == "http":
+            out["transport"] = {"type": "tcp", "header": {"type": "http", "request": {}, "response": {}}}
+        return out
+    except Exception as e:
+        log(f"解析 vless URI 失败: {e}", "WARN")
+        return None
+
+def parse_vmess(uri):
+    try:
+        enc = uri[8:]
+        pad = 4 - len(enc) % 4
+        if pad != 4:
+            enc += '=' * pad
+        d = json.loads(base64.b64decode(enc).decode('utf-8'))
+        out = {"type": "vmess", "tag": d.get("ps", "vmess"), "server": d.get("add", ""), "server_port": int(d.get("port", 443)), "uuid": d.get("id", ""), "alter_id": d.get("aid", 0), "security": d.get("scy", "auto") if d.get("scy", "auto") in ("auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero") else "auto"}
+        tls = d.get("tls", "")
+        if tls in ("tls", "1", "true"):
+            tc = {"enabled": True, "server_name": d.get("sni", d.get("add", ""))}
+            if d.get("allowInsecure", "0") in ("1", "true", "yes"):
+                tc["insecure"] = True
+            fp = d.get("fp", "chrome")
+            if fp.lower() != "none":
+                tc["utls"] = {"enabled": True, "fingerprint": fp.lower()}
+            out["tls"] = tc
+        net = d.get("net", "ws")
+        if net == "ws":
+            tr = {"type": "ws", "path": d.get("path", "/"), "headers": {"Host": d.get("host", d.get("add", ""))}}
+            ed = d.get("maxEarlyData", "")
+            if ed:
+                try: tr["max_early_data"] = int(ed)
+                except: pass
+            out["transport"] = tr
+        elif net == "grpc":
+            out["transport"] = {"type": "grpc", "service_name": d.get("serviceName", "")}
+        elif net == "tcp" and d.get("headerType", "none") == "http":
+            out["transport"] = {"type": "tcp", "header": {"type": "http", "request": {}, "response": {}}}
+        return out
+    except Exception as e:
+        log(f"解析 vmess URI 失败: {e}", "WARN")
+        return None
+
+def parse_ss(uri):
+    try:
+        prefix = "ss://"
+        if uri.startswith("ssconf://"):
+            prefix = "ssconf://"
+        rest = uri[len(prefix):]
+        if '#' in rest:
+            rest, name = rest.rsplit('#', 1); name = unquote(name)
+        else:
+            name = "ss"
+        if '@' in rest:
+            enc, sp = rest.split('@', 1)
+            if ':' in sp:
+                srv, prt = sp.rsplit(':', 1); prt = int(prt)
+            else:
+                srv, prt = sp, 443
+            pad = 4 - len(enc) % 4
+            if pad != 4: enc += '=' * pad
+            dec = base64.b64decode(enc).decode('utf-8')
+            if ':' in dec:
+                method, pw = dec.split(':', 1)
+            else:
+                method, pw = "aes-256-gcm", dec
+            return {"type": "shadowsocks", "tag": name, "server": srv, "server_port": prt, "method": method, "password": pw}
+        else:
+            pad = 4 - len(rest) % 4
+            if pad != 4: rest += '=' * pad
+            dec = base64.b64decode(rest).decode('utf-8')
+            if '@' in dec:
+                mp, sp = dec.rsplit('@', 1)
+                method, pw = mp.split(':', 1)
+                srv, prt = sp.rsplit(':', 1) if ':' in sp else (sp, 443); prt = int(prt)
+                return {"type": "shadowsocks", "tag": name, "server": srv, "server_port": prt, "method": method, "password": pw}
+        return None
+    except Exception as e:
+        log(f"解析 ss URI 失败: {e}", "WARN")
+        return None
+
+def parse_tuic(uri):
+    try:
+        rest = uri[7:]
+        if '#' in rest:
+            rest, name = rest.rsplit('#', 1); name = unquote(name)
+        else:
+            name = "tuic"
+        if '?' in rest:
+            addr, ps = rest.split('?', 1)
+        else:
+            addr, ps = rest, ""
+        if '@' not in addr:
+            return None
+        creds, hp = addr.rsplit('@', 1)
+        creds = unquote(creds)
+        uuid, password = creds.split(':', 1) if ':' in creds else (creds, "")
+        srv, prt = hp.rsplit(':', 1) if ':' in hp else (hp, 443); prt = int(prt)
+        pp = parse_qs(ps)
+        def p(k, d=None):
+            v = pp.get(k); return v[0] if v else d
+        out = {"type": "tuic", "tag": name, "server": srv, "server_port": prt, "uuid": uuid, "password": password, "congestion_control": p("congestion_control", "bbr"), "udp_relay_mode": p("udp_relay_mode", "native")}
+        out["tls"] = {"enabled": True, "server_name": p("sni", srv), "insecure": p("allow_insecure", "0") in ("1", "true", "yes")}
+        alpn = p("alpn", "")
+        if alpn:
+            out["tls"]["alpn"] = [a.strip() for a in alpn.split(",")]
+        return out
+    except Exception as e:
+        log(f"解析 tuic URI 失败: {e}", "WARN")
+        return None
+
+def parse_trojan(uri):
+    try:
+        rest = uri[9:]
+        if '#' in rest:
+            rest, name = rest.rsplit('#', 1); name = unquote(name)
+        else:
+            name = "trojan"
+        if '?' in rest:
+            addr, ps = rest.split('?', 1)
+        else:
+            addr, ps = rest, ""
+        if '@' not in addr:
+            return None
+        pw, hp = addr.split('@', 1)
+        srv, prt = hp.rsplit(':', 1) if ':' in hp else (hp, 443); prt = int(prt)
+        pp = parse_qs(ps)
+        def p(k, d=None):
+            v = pp.get(k); return v[0] if v else d
+        out = {"type": "trojan", "tag": name, "server": srv, "server_port": prt, "password": pw}
+        tc = {"enabled": True, "server_name": p("sni", srv)}
+        if p("insecure", "0") in ("1", "true", "yes") or p("allowInsecure", "0") in ("1", "true", "yes"):
+            tc["insecure"] = True
+        alpn = p("alpn", "")
+        if alpn:
+            tc["alpn"] = [a.strip() for a in alpn.split(",")]
+        fp = p("fp", "chrome")
+        if fp != "none":
+            tc["utls"] = {"enabled": True, "fingerprint": fp}
+        out["tls"] = tc
+        ttype = p("type", "tcp")
+        if ttype == "ws":
+            tr = {"type": "ws", "path": p("path", "/"), "headers": {"Host": p("host", srv)}}
+            ed = p("ed", "")
+            if ed:
+                try: tr["max_early_data"] = int(ed)
+                except: pass
+            out["transport"] = tr
+        elif ttype == "grpc":
+            out["transport"] = {"type": "grpc", "service_name": p("serviceName", "")}
+        return out
+    except Exception as e:
+        log(f"解析 trojan URI 失败: {e}", "WARN")
+        return None
+
+class ProxyManager:
+    def __init__(self, sub_url):
+        self.sub_url = sub_url
+        self.proxy_nodes = []
+        self.current_proxy_idx = 0
+        self.singbox_process = None
+        self.warp_private_key = None
+        self.warp_address = None
+        self.warp_reserved = None
+
+    def init(self):
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+        self._download_wgcf()
+        self._fetch_proxies()
+        self._register_warp()
+        self._start_singbox()
+
+    def _download_wgcf(self):
+        if WGCF_PATH.exists():
+            return
+        log("下载 wgcf...")
+        r = requests.get(WGCF_URL, timeout=60)
+        WGCF_PATH.write_bytes(r.content)
+        WGCF_PATH.chmod(0o755)
+        log("wgcf 下载完成")
+
+    def _fetch_proxies(self):
+        if not self.sub_url:
+            log("未配置 SUB_URL，将直连 WARP（无代理隧道）", "WARN")
+            return
+        log(f"获取订阅节点: {self.sub_url[:60]}...")
+        try:
+            r = requests.get(self.sub_url, timeout=30)
+            r.raise_for_status()
+            text = r.text.strip()
+            try:
+                pad = 4 - len(text) % 4
+                if pad != 4:
+                    text += '=' * pad
+                decoded = base64.b64decode(text).decode('utf-8')
+                if any(c in decoded for c in [':', '/', '\n']):
+                    text = decoded
+            except Exception:
+                pass
+            uris = [u.strip() for u in text.splitlines() if u.strip() and '://' in u]
+            for uri in uris:
+                ob = parse_proxy_uri(uri)
+                if ob:
+                    self.proxy_nodes.append(ob)
+            log(f"解析到 {len(self.proxy_nodes)} 个有效节点 (共 {len(uris)} 个 URI)")
+            if self.proxy_nodes:
+                n = self.proxy_nodes[0]
+                log(f"当前节点: [{n.get('tag','?')}] {n.get('type','?')} -> {n.get('server','?')}:{n.get('server_port','?')}")
+        except Exception as e:
+            log(f"获取订阅失败: {e}", "ERROR")
+
+    def _register_warp(self):
+        log("注册 WARP WireGuard...")
+        for f in [WGCF_ARCHIVE, WGCF_PROFILE]:
+            if f.exists():
+                f.unlink()
+        try:
+            subprocess.run(f"echo Yes | {WGCF_PATH} register", shell=True, cwd=WORK_DIR, capture_output=True, timeout=90)
+            subprocess.run(f"{WGCF_PATH} generate", shell=True, cwd=WORK_DIR, capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            log("wgcf 超时", "ERROR")
+            raise RuntimeError("wgcf 超时")
+        except Exception as e:
+            log(f"wgcf 失败: {e}", "ERROR")
+            raise
+
+        if not WGCF_PROFILE.exists():
+            raise RuntimeError("wgcf-profile.conf 未生成")
+
+        for line in WGCF_PROFILE.read_text().splitlines():
+            t = line.strip()
+            if t.startswith('PrivateKey = '):
+                self.warp_private_key = t[len('PrivateKey = '):]
+            elif t.startswith('Address = ') and not self.warp_address:
+                self.warp_address = t[len('Address = '):]
+
+        if WGCF_ARCHIVE.exists():
+            content = WGCF_ARCHIVE.read_text()
+            idx = content.find('reserved = ')
+            if idx >= 0:
+                start = content.find('[', idx)
+                end = content.find(']', start)
+                if start >= 0 and end > start:
+                    inner = content[start+1:end]
+                    self.warp_reserved = [int(s.strip()) for s in inner.split(',') if s.strip().lstrip('-').isdigit()]
+
+        log(f"WARP 密钥: {self.warp_private_key[:16] if self.warp_private_key else 'N/A'}...")
+        log(f"WARP 地址: {self.warp_address}")
+        if self.warp_reserved:
+            log(f"WARP reserved: {self.warp_reserved}")
+        if not self.warp_private_key or not self.warp_address:
+            raise RuntimeError("WARP 配置不完整")
+
+    def _build_config(self):
+        warp_wg = {
+            "type": "wireguard",
+            "tag": "warp-wg",
+            "server": "engage.cloudflareclient.com",
+            "server_port": 2408,
+            "local_address": [self.warp_address],
+            "private_key": self.warp_private_key,
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "reserved": self.warp_reserved or [0, 0, 0],
+            "mtu": 1280,
+        }
+
+        outbounds = [{"type": "direct", "tag": "direct"}]
+
+        if self.current_proxy_idx < len(self.proxy_nodes):
+            proxy = self.proxy_nodes[self.current_proxy_idx].copy()
+            proxy["tag"] = "proxy-out"
+            warp_wg["detour"] = "proxy-out"
+            outbounds.insert(0, proxy)
+            np = self.proxy_nodes[self.current_proxy_idx]
+            log(f"WARP 隧道走代理: [{np.get('tag','?')}] {np.get('type','?')} -> {np.get('server','?')}:{np.get('server_port','?')}")
+        else:
+            log("WARP 直连（无代理隧道）")
+
+        outbounds.append(warp_wg)
+
+        config = {
+            "log": {"level": "error"},
+            "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": SINGBOX_PORT}],
+            "outbounds": outbounds,
+            "route": {"final": "warp-wg"}
+        }
+
+        SINGBOX_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        SINGBOX_CONFIG.write_text(json.dumps(config, indent=2))
+        log(f"sing-box 配置已写入: {SINGBOX_CONFIG}")
+
+    def _start_singbox(self):
+        self._build_config()
+        self._stop_singbox()
+
+        sb_bin = None
+        for p in ["/usr/bin/sing-box", "/usr/local/bin/sing-box"]:
+            if os.path.exists(p):
+                sb_bin = p
+                break
+        if not sb_bin:
+            raise RuntimeError("sing-box 未安装 (需先 apt install)")
+
+        try:
+            self.singbox_process = subprocess.Popen(
+                [sb_bin, "run", "-c", str(SINGBOX_CONFIG)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                preexec_fn=os.setsid
+            )
+            time.sleep(3)
+            if self.singbox_process.poll() is not None:
+                stderr = self.singbox_process.stderr.read().decode()
+                raise RuntimeError(f"sing-box 启动失败: {stderr[:300]}")
+            log(f"sing-box 启动成功 (PID: {self.singbox_process.pid})")
+            if not self.check_socks():
+                log("SOCKS5 端口未监听，等待...")
+                for _ in range(10):
+                    time.sleep(1)
+                    if self.check_socks():
+                        break
+                if not self.check_socks():
+                    raise RuntimeError("SOCKS5 端口监听超时")
+            log("SOCKS5 代理就绪 (127.0.0.1:{SINGBOX_PORT})")
+        except Exception as e:
+            log(f"sing-box 启动异常: {e}", "ERROR")
+            raise
+
+    def _stop_singbox(self):
+        if self.singbox_process:
+            try:
+                os.killpg(os.getpgid(self.singbox_process.pid), signal.SIGTERM)
+                self.singbox_process.wait(timeout=5)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(self.singbox_process.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+            self.singbox_process = None
+            log("sing-box 已停止")
+
+    def restart(self):
+        log("重新注册 WARP + 重启 sing-box...")
+        self._stop_singbox()
+        self.warp_address = None
+        self.warp_private_key = None
+        self.warp_reserved = None
+        self._register_warp()
+        self._start_singbox()
+
+    def switch_proxy_and_restart(self):
+        if not self.proxy_nodes:
+            log("无代理节点可切换", "WARN")
+            return False
+        self._stop_singbox()
+        self.current_proxy_idx = (self.current_proxy_idx + 1) % len(self.proxy_nodes)
+        log(f"切换到代理 [{self.current_proxy_idx + 1}/{len(self.proxy_nodes)}]")
+        self._start_singbox()
+        return True
+
+    def stop(self):
+        self._stop_singbox()
+
+    def check_socks(self):
+        try:
+            s = socket.create_connection(("127.0.0.1", SINGBOX_PORT), timeout=2)
+            s.close()
+            return True
+        except Exception:
+            return False
+
+def renew_single_url(url, proxy_mgr):
     success = False
     server_name = "未知"
     old_expire = "未知"
@@ -461,6 +879,15 @@ def renew_single_url(url):
     try:
         for attempt in range(1, MAX_RENEW_RETRIES_PER_URL + 1):
             log(f"{'='*20} 续期尝试 {attempt}/{MAX_RENEW_RETRIES_PER_URL} {'='*20}")
+            if not proxy_mgr.check_socks():
+                log("SOCKS5 代理不可用，重启 sing-box", "WARN")
+                try:
+                    proxy_mgr.restart()
+                except Exception as e:
+                    log(f"重启 sing-box 失败: {e}", "ERROR")
+                    failure_reason = f"sing-box 重启失败: {str(e)[:100]}"
+                    break
+
             page = None
             try:
                 co = ChromiumOptions()
@@ -477,6 +904,7 @@ def renew_single_url(url):
                 co.set_argument('--window-size=1280,720')
                 co.set_argument('--log-level=3')
                 co.set_argument('--silent')
+                co.set_argument(f'--proxy-server=socks5://127.0.0.1:{SINGBOX_PORT}')
                 user_data_dir = tempfile.mkdtemp()
                 co.set_user_data_path(user_data_dir)
                 co.auto_port()
@@ -559,7 +987,7 @@ def renew_single_url(url):
                 try:
                     solved = solve_recaptcha(page)
                 except CaptchaBlocked:
-                    log("IP 被封锁，换 IP 后重试", "WARN")
+                    log("IP 被封锁，切换代理/重注册后重试", "WARN")
                     failure_reason = "IP 被 reCAPTCHA 封锁"
                     try:
                         page.quit()
@@ -567,7 +995,10 @@ def renew_single_url(url):
                         pass
                     page = None
                     if attempt < MAX_RENEW_RETRIES_PER_URL:
-                        restart_warp()
+                        try:
+                            proxy_mgr.switch_proxy_and_restart()
+                        except Exception:
+                            proxy_mgr.restart()
                         continue
                     break
                 except Exception as e:
@@ -611,7 +1042,10 @@ def renew_single_url(url):
                         except:
                             pass
                         page = None
-                    restart_warp()
+                    try:
+                        proxy_mgr.restart()
+                    except Exception:
+                        pass
                     continue
                 break
             finally:
@@ -633,27 +1067,42 @@ def renew_single_url(url):
 def main():
     tg_token = os.getenv("TG_BOT_TOKEN")
     tg_chat_id = os.getenv("TG_CHAT_ID")
+    sub_url = os.getenv("SUB_URL")
+
     if not RENEW_URLS:
         log("请在 RENEW_URLS 列表中添加续期链接", "ERROR")
         sys.exit(1)
 
+    proxy_mgr = ProxyManager(sub_url)
+    try:
+        log("初始化 WARP + sing-box 代理环境...")
+        proxy_mgr.init()
+    except Exception as e:
+        log(f"代理初始化失败: {e}", "ERROR")
+        proxy_mgr.stop()
+        sys.exit(1)
+
     total_success = 0
-    for idx, url in enumerate(RENEW_URLS, 1):
-        log(f"{'#'*60}")
-        log(f"处理第 {idx} 个链接: {url}")
-        log(f"{'#'*60}")
+    try:
+        for idx, url in enumerate(RENEW_URLS, 1):
+            log(f"{'#'*60}")
+            log(f"处理第 {idx} 个链接: {url}")
+            log(f"{'#'*60}")
 
-        success, server_name, old_expire, new_expire, screenshot, failure_reason = renew_single_url(url)
+            success, server_name, old_expire, new_expire, screenshot, failure_reason = renew_single_url(url, proxy_mgr)
 
-        if success:
-            caption = build_notification(True, url, server_name, old_expire, new_expire)
-            total_success += 1
-        else:
-            caption = build_notification(False, url, server_name, old_expire, failure_reason=failure_reason)
+            if success:
+                caption = build_notification(True, url, server_name, old_expire, new_expire)
+                total_success += 1
+            else:
+                caption = build_notification(False, url, server_name, old_expire, failure_reason=failure_reason)
 
-        send_tg_photo(tg_token, tg_chat_id, screenshot, caption, parse_mode='HTML')
+            send_tg_photo(tg_token, tg_chat_id, screenshot, caption, parse_mode='HTML')
 
-    log(f"全部完成，成功 {total_success}/{len(RENEW_URLS)} 个链接")
+        log(f"全部完成，成功 {total_success}/{len(RENEW_URLS)} 个链接")
+    finally:
+        proxy_mgr.stop()
+
     if total_success < len(RENEW_URLS):
         sys.exit(1)
 

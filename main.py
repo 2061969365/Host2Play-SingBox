@@ -345,7 +345,7 @@ def renew_single_url(url):
                     time.sleep(2)
 
                     # Get CSRF token
-                    csrf_token = page.evaluate("document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') or ''")
+                    csrf_token = page.evaluate("document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || ''")
                     log(f"CSRF Token: {csrf_token[:20]}...")
 
                     # Get server info

@@ -859,12 +859,17 @@ class ProxyManager:
         warp_wg = {
             "type": "wireguard",
             "tag": "warp-wg",
-            "server": "engage.cloudflareclient.com",
-            "server_port": 2408,
-            "local_address": [self.warp_address],
+            "address": [self.warp_address],
             "private_key": self.warp_private_key,
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "reserved": self.warp_reserved or [0, 0, 0],
+            "peers": [
+                {
+                    "address": "engage.cloudflareclient.com",
+                    "port": 2408,
+                    "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                    "allowed_ips": ["0.0.0.0/0", "::/0"],
+                    "reserved": self.warp_reserved or [0, 0, 0],
+                }
+            ],
             "mtu": 1280,
         }
 

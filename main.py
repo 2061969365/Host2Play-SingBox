@@ -815,15 +815,18 @@ class ProxyManager:
         for f in [WGCF_ARCHIVE, WGCF_PROFILE]:
             if f.exists():
                 f.unlink()
-        try:
-            subprocess.run(f"echo Yes | {WGCF_PATH} register", shell=True, cwd=WORK_DIR, capture_output=True, timeout=90)
-            subprocess.run(f"{WGCF_PATH} generate", shell=True, cwd=WORK_DIR, capture_output=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            log("wgcf 超时", "ERROR")
-            raise RuntimeError("wgcf 超时")
-        except Exception as e:
-            log(f"wgcf 失败: {e}", "ERROR")
-            raise
+        r1 = subprocess.run("echo Yes | ./wgcf register", shell=True, cwd=WORK_DIR, capture_output=True, timeout=90)
+        if r1.returncode != 0:
+            err = r1.stderr.decode()[:200] or r1.stdout.decode()[:200]
+            log(f"wgcf register 失败 ({r1.returncode}): {err}", "ERROR")
+            raise RuntimeError(f"wgcf register 失败: {err}")
+        log("wgcf register 成功")
+        r2 = subprocess.run("./wgcf generate", shell=True, cwd=WORK_DIR, capture_output=True, timeout=60)
+        if r2.returncode != 0:
+            err = r2.stderr.decode()[:200] or r2.stdout.decode()[:200]
+            log(f"wgcf generate 失败 ({r2.returncode}): {err}", "ERROR")
+            raise RuntimeError(f"wgcf generate 失败: {err}")
+        log("wgcf generate 成功")
 
         if not WGCF_PROFILE.exists():
             raise RuntimeError("wgcf-profile.conf 未生成")

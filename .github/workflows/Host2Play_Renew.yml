@@ -2,8 +2,7 @@ name: Host2Play 续期
 
 on:
   schedule:
-    - cron: '0 0,11,22 * * *'
-    - cron: '30 5,16 * * *'
+    - cron: 
   workflow_dispatch:
 
 permissions:

@@ -680,28 +680,35 @@ class ProxyManager:
             return
         raw = self.sub_url.strip()
         uris = []
-        if '://' in raw and not raw.startswith('http'):
-            log("检测到单节点 URI，直接解析")
-            uris = [raw]
-        else:
-            log(f"获取订阅: {raw[:60]}...")
-            try:
-                r = requests.get(raw, timeout=30)
-                r.raise_for_status()
-                text = r.text.strip()
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or '://' not in line:
+                continue
+            if line.startswith(('http://', 'https://')):
+                log(f"获取订阅: {line[:60]}...")
                 try:
-                    pad = 4 - len(text) % 4
-                    if pad != 4:
-                        text += '=' * pad
-                    decoded = base64.b64decode(text).decode('utf-8')
-                    if any(c in decoded for c in [':', '/', '\n']):
-                        text = decoded
-                except Exception:
-                    pass
-                uris = [u.strip() for u in text.splitlines() if u.strip() and '://' in u]
-            except Exception as e:
-                log(f"获取订阅失败: {e}", "ERROR")
-                return
+                    r = requests.get(line, timeout=30)
+                    r.raise_for_status()
+                    text = r.text.strip()
+                    try:
+                        pad = 4 - len(text) % 4
+                        if pad != 4:
+                            text += '=' * pad
+                        decoded = base64.b64decode(text).decode('utf-8')
+                        if any(c in decoded for c in [':', '/', '\n']):
+                            text = decoded
+                    except Exception:
+                        pass
+                    uris.extend(u.strip() for u in text.splitlines() if u.strip() and '://' in u)
+                except Exception as e:
+                    log(f"获取订阅失败: {e}", "WARN")
+                    continue
+            else:
+                log(f"检测到节点 URI: {line[:50]}...")
+                uris.append(line)
+        if not uris:
+            log("未解析到任何节点 URI", "WARN")
+            return
         for uri in uris:
             ob = parse_proxy_uri(uri)
             if ob:

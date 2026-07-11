@@ -364,10 +364,20 @@ def renew_single_url(url):
                     """)
                     time.sleep(random.uniform(5, 8))
 
-                    # Wait for reCAPTCHA
-                    anchor_frame = find_recaptcha_frame(page, "anchor")
+                    # Wait for reCAPTCHA with longer retry
+                    anchor_frame = None
+                    for _ in range(8):
+                        anchor_frame = find_recaptcha_frame(page, "anchor")
+                        if anchor_frame:
+                            break
+                        time.sleep(2)
                     if not anchor_frame:
-                        log("未检测到 reCAPTCHA")
+                        log("未检测到 reCAPTCHA，截取当前页面状态...")
+                        modal_html = page.evaluate("document.querySelector('.modal-content')?.innerHTML.slice(0, 500) || '无弹窗内容'")
+                        body_html = page.evaluate("document.body.innerText.slice(0, 500)")
+                        log(f"弹窗内容: {modal_html[:200]}")
+                        log(f"页面文本: {body_html[:200]}")
+                        capture_screenshot(page, os.path.join(screenshot_dir, f"host2play-norecaptcha.png"), "未检测到 reCAPTCHA")
                         failure_reason = "未找到 reCAPTCHA"
                         break
 
